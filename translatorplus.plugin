@@ -32,7 +32,6 @@ _last_offline_check = 0
 in_progress_messages = set()
 
 _translation_cache = {}
-_cache_dirty = False
 _cache_last_save = 0
 _cache_save_interval = 30
 
@@ -73,19 +72,16 @@ def load_cache():
 
 
 def save_cache(cache_data):
-    global _cache_dirty, _cache_last_save
-    _cache_dirty = True
+    global _cache_last_save
     current_time = time.time()
     if current_time - _cache_last_save < _cache_save_interval:
         return
     _cache_last_save = current_time
-    
+
     def _save():
-        global _cache_dirty
         with open(TRANSLATIONS_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, ensure_ascii=False, indent=2)
-        _cache_dirty = False
-    
+
     safe_execute(_save, "[CACHE] Failed to save cache")
 
 
@@ -132,8 +128,7 @@ def _get_telegram_target_language():
         debug_log(f"[LANG] Failed to read dialog language: {e}")
     
     try:
-        MessagesController_class = jclass("org.telegram.messenger.MessagesController")
-        telegram_lang = MessagesController_class.getGlobalMainSettings().getString("translate_to_language", None)
+        telegram_lang = MessagesController.getGlobalMainSettings().getString("translate_to_language", None)
         if telegram_lang:
             return telegram_lang
     except Exception:
@@ -285,6 +280,43 @@ def _translate_with_google_async(text: str, target_lang: str, callback: Callable
     threading.Thread(target=task, daemon=True).start()
 
 
+def _cached_translate(text: str, target_lang: str, log_prefix: str = "") -> Optional[str]:
+    """Look up a translation in the on-disk cache, falling back to a live
+    Google request and persisting the result. Shared by both the entire-chat
+    hook and the live-message prefetch path so the cache/online/save
+    sequence only lives in one place."""
+    cache_key = get_cache_key(text, target_lang)
+    cache_data = load_cache()
+
+    if cache_key in cache_data:
+        debug_log(f"{log_prefix}[CACHE HIT]")
+        return cache_data[cache_key]
+
+    if not is_online():
+        debug_log(f"{log_prefix}[OFFLINE] Skipping translation...")
+        return None
+
+    start_time = time.time()
+    translated_text = _translate_with_google(text, target_lang)
+    elapsed = time.time() - start_time
+
+    if not translated_text:
+        debug_log(f"{log_prefix}[FAIL] GOOGLE in {elapsed:.2f}s")
+        return None
+
+    cache_data[cache_key] = translated_text
+    save_cache(cache_data)
+    debug_log(f"{log_prefix}[GOOGLE] {elapsed:.2f}s")
+    return translated_text
+
+
+def _begin_tracking(message_key: str, msg_id: int):
+    """Mark a translation job as in-progress and switch on the native
+    shimmer. Shared by the entire-chat hook and the live-message path."""
+    in_progress_messages.add(message_key)
+    _set_translation_loading(msg_id, True)
+
+
 def _get_valid_text(message_object) -> Optional[str]:
     """Extract valid text from message object - centralized validation"""
     original_text = message_object.messageText
@@ -404,21 +436,21 @@ class ResultHook(MethodHook):
 
 
 class LocalPremiumHook:
-    def __init__(self):
-        self._premium_unhooks = []
+    # Note: AdvancedTranslatorPlugin's MRO never calls this mixin's __init__,
+    # so _premium_unhooks is initialized explicitly in on_plugin_load instead.
+    # premium_unhooking() also uses getattr() as a defensive fallback.
 
     def premium_hooking(self):
         clazz = jclass("org.telegram.messenger.UserConfig")
-        clazz2 = jclass("org.telegram.messenger.MessagesController")
-        
+
         self._premium_unhooks = [
             self.hook_method(clazz.getClass().getDeclaredMethod("isPremium"), ResultHook(True)),
             self.hook_method(clazz.getClass().getDeclaredMethod("hasPremiumOnAccounts"), ResultHook(True)),
-            self.hook_method(clazz2.getClass().getDeclaredMethod("premiumFeaturesBlocked"), ResultHook(False)),
+            self.hook_method(MessagesController.getClass().getDeclaredMethod("premiumFeaturesBlocked"), ResultHook(False)),
         ]
 
     def premium_unhooking(self):
-        for unhook in self._premium_unhooks:
+        for unhook in getattr(self, "_premium_unhooks", []):
             safe_execute(lambda u=unhook: self.unhook_method(u))
         self._premium_unhooks = []
 
@@ -430,7 +462,8 @@ class AdvancedTranslatorPlugin(BasePlugin, LocalPremiumHook):
         global _plugin_instance
         _plugin_instance = self
         self._in_message_hooks = []
-        
+        self._premium_unhooks = []
+
         if not JAVA_CLASSES_FOUND:
             BulletinHelper.show_error("Translator: Failed to load (core classes not found).")
             return
@@ -552,39 +585,23 @@ class AdvancedTranslatorPlugin(BasePlugin, LocalPremiumHook):
         message_key = f"live_{msg.id}_{dialog_id}"
         if message_key in in_progress_messages:
             return
-        in_progress_messages.add(message_key)
-        _set_translation_loading(msg.id, True)
+        _begin_tracking(message_key, msg.id)
 
         _executor.submit(self._translate_live_message, text, message_key, target_lang, msg)
 
     def _translate_live_message(self, text, message_key, target_lang, msg):
         try:
-            cache_key = get_cache_key(text, target_lang)
-            cache_data = load_cache()
+            translated = _cached_translate(text, target_lang, log_prefix="[LIVE]")
+            if translated:
+                def ui_update():
+                    try:
+                        msg.translatedText = _create_text_with_entities(translated)
+                        msg.translatedToLanguage = target_lang
+                        _post_ui_refresh()
+                    except Exception as e:
+                        log(f"[LIVE] Failed to apply translation: {e}")
 
-            if cache_key in cache_data:
-                debug_log("[LIVE][CACHE HIT]")
-                translated = cache_data[cache_key]
-            else:
-                if not is_online():
-                    debug_log("[LIVE][OFFLINE] Skipping translation...")
-                    return
-                translated = _translate_with_google(text, target_lang)
-                if not translated:
-                    debug_log("[LIVE][FAIL] GOOGLE")
-                    return
-                cache_data[cache_key] = translated
-                save_cache(cache_data)
-
-            def ui_update():
-                try:
-                    msg.translatedText = _create_text_with_entities(translated)
-                    msg.translatedToLanguage = target_lang
-                    _post_ui_refresh()
-                except Exception as e:
-                    log(f"[LIVE] Failed to apply translation: {e}")
-
-            run_on_ui_thread(ui_update)
+                run_on_ui_thread(ui_update)
         except Exception as e:
             debug_log(f"[LIVE] translation failed: {e}")
         finally:
@@ -697,8 +714,7 @@ class TranslateHook(MethodReplacement):
                 debug_log(f"[SKIP] Already {target_lang}")
                 return None
             
-            in_progress_messages.add(message_key)
-            _set_translation_loading(message_object.getId(), True)
+            _begin_tracking(message_key, message_object.getId())
             _executor.submit(self._process_translation, original_text, message_key, target_lang, message_object)
         except Exception as e:
             self._handle_error(e, "replace_hooked_method")
@@ -715,30 +731,9 @@ class TranslateHook(MethodReplacement):
 
     def _process_translation(self, original_text: str, message_key: str, target_lang_code: str, message_object):
         try:
-            cache_key = get_cache_key(original_text, target_lang_code)
-            cache_data = load_cache()
-            
-            if cache_key in cache_data:
-                debug_log("[CACHE HIT]")
-                self._store_translation_in_native_storage(message_object, cache_data[cache_key], target_lang_code)
-                return
-            
-            if not is_online():
-                debug_log("[OFFLINE] Skipping translation...")
-                return
-            
-            start_time = time.time()
-            translated_text = _translate_with_google(original_text, target_lang_code)
-            elapsed = time.time() - start_time
-            
-            if not translated_text:
-                debug_log(f"[FAIL] GOOGLE in {elapsed:.2f}s")
-                return
-            
-            cache_data[cache_key] = translated_text
-            save_cache(cache_data)
-            debug_log(f"[GOOGLE] {elapsed:.2f}s")
-            self._store_translation_in_native_storage(message_object, translated_text, target_lang_code)
+            translated_text = _cached_translate(original_text, target_lang_code)
+            if translated_text:
+                self._store_translation_in_native_storage(message_object, translated_text, target_lang_code)
         except Exception as e:
             self._handle_error(e, "_process_translation")
         finally:
@@ -819,6 +814,6 @@ __name__ = "TranslatorPlus"
 __description__ = "Ultra-fast multi-provider translation for Telegram with in-message support"
 __icon__ = "luvztroyicons/1"
 __id__ = "translatorplus"
-__version__ = "1.4.2"
+__version__ = "1.4.3"
 __author__ = "@xwvux"
 __min_version__ = "11.12.0"
