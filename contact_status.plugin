@@ -1,0 +1,500 @@
+from base_plugin import BasePlugin, MethodHook, hook_filters, HookFilter
+from hook_utils import find_class
+from java import jclass
+
+__id__ = "contact_status"
+__name__ = "Contact Status"
+__type__ = "plugin"
+__description__ = "Show mutual contact status and phone number country in user profiles"
+__version__ = "1.5.0"
+__author__ = "@xwvux"
+__min_version__ = "12.2.10"
+
+VIEW_TYPE_TEXT_DETAIL = 2
+
+COUNTRY_CALLING_CODES = {
+    "1": "United States/Canada",
+    "1242": "Bahamas",
+    "1246": "Barbados",
+    "1264": "Anguilla",
+    "1268": "Antigua and Barbuda",
+    "1284": "British Virgin Islands",
+    "1340": "US Virgin Islands",
+    "1345": "Cayman Islands",
+    "1441": "Bermuda",
+    "1473": "Grenada",
+    "1649": "Turks and Caicos Islands",
+    "1664": "Montserrat",
+    "1670": "Northern Mariana Islands",
+    "1671": "Guam",
+    "1684": "American Samoa",
+    "1721": "Sint Maarten",
+    "1758": "Saint Lucia",
+    "1767": "Dominica",
+    "1784": "Saint Vincent and the Grenadines",
+    "1787": "Puerto Rico",
+    "1809": "Dominican Republic",
+    "1829": "Dominican Republic",
+    "1849": "Dominican Republic",
+    "1868": "Trinidad and Tobago",
+    "1869": "Saint Kitts and Nevis",
+    "1876": "Jamaica",
+    "1939": "Puerto Rico",
+
+    "7": "Russia/Kazakhstan",
+
+    "20": "Egypt", "27": "South Africa", "30": "Greece", "31": "Netherlands",
+    "32": "Belgium", "33": "France", "34": "Spain", "36": "Hungary",
+    "39": "Italy", "40": "Romania", "41": "Switzerland", "43": "Austria",
+    "44": "United Kingdom", "45": "Denmark", "46": "Sweden", "47": "Norway",
+    "48": "Poland", "49": "Germany",
+
+    "51": "Peru", "52": "Mexico", "53": "Cuba", "54": "Argentina",
+    "55": "Brazil", "56": "Chile", "57": "Colombia", "58": "Venezuela",
+
+    "60": "Malaysia", "61": "Australia", "62": "Indonesia", "63": "Philippines",
+    "64": "New Zealand", "65": "Singapore", "66": "Thailand",
+
+    "81": "Japan", "82": "South Korea", "84": "Vietnam", "86": "China",
+
+    "90": "Turkey", "91": "India", "92": "Pakistan", "93": "Afghanistan",
+    "94": "Sri Lanka", "95": "Myanmar", "98": "Iran",
+
+    "211": "South Sudan", "212": "Morocco", "213": "Algeria", "216": "Tunisia",
+    "218": "Libya", "220": "Gambia", "221": "Senegal", "222": "Mauritania",
+    "223": "Mali", "224": "Guinea", "225": "Ivory Coast", "226": "Burkina Faso",
+    "227": "Niger", "228": "Togo", "229": "Benin", "230": "Mauritius",
+    "231": "Liberia", "232": "Sierra Leone", "233": "Ghana", "234": "Nigeria",
+    "235": "Chad", "236": "Central African Republic", "237": "Cameroon",
+    "238": "Cape Verde", "239": "Sao Tome and Principe", "240": "Equatorial Guinea",
+    "241": "Gabon", "242": "Republic of the Congo", "243": "DR Congo",
+    "244": "Angola", "245": "Guinea-Bissau", "246": "British Indian Ocean Territory",
+    "248": "Seychelles", "249": "Sudan", "250": "Rwanda", "251": "Ethiopia",
+    "252": "Somalia", "253": "Djibouti", "254": "Kenya", "255": "Tanzania",
+    "256": "Uganda", "257": "Burundi", "258": "Mozambique", "260": "Zambia",
+    "261": "Madagascar", "262": "Reunion/Mayotte", "263": "Zimbabwe",
+    "264": "Namibia", "265": "Malawi", "266": "Lesotho", "267": "Botswana",
+    "268": "Eswatini", "269": "Comoros", "290": "Saint Helena", "291": "Eritrea",
+    "297": "Aruba", "298": "Faroe Islands", "299": "Greenland",
+
+    "350": "Gibraltar", "351": "Portugal", "352": "Luxembourg", "353": "Ireland",
+    "354": "Iceland", "355": "Albania", "356": "Malta", "357": "Cyprus",
+    "358": "Finland", "359": "Bulgaria", "370": "Lithuania", "371": "Latvia",
+    "372": "Estonia", "373": "Moldova", "374": "Armenia", "375": "Belarus",
+    "376": "Andorra", "377": "Monaco", "378": "San Marino", "380": "Ukraine",
+    "381": "Serbia", "382": "Montenegro", "383": "Kosovo", "385": "Croatia",
+    "386": "Slovenia", "387": "Bosnia and Herzegovina", "389": "North Macedonia",
+    "420": "Czech Republic", "421": "Slovakia", "423": "Liechtenstein",
+
+    "500": "Falkland Islands", "501": "Belize", "502": "Guatemala",
+    "503": "El Salvador", "504": "Honduras", "505": "Nicaragua",
+    "506": "Costa Rica", "507": "Panama", "508": "Saint Pierre and Miquelon",
+    "509": "Haiti", "590": "Guadeloupe", "591": "Bolivia", "592": "Guyana",
+    "593": "Ecuador", "594": "French Guiana", "595": "Paraguay",
+    "596": "Martinique", "597": "Suriname", "598": "Uruguay",
+    "599": "Curacao/Netherlands Antilles",
+
+    "670": "East Timor", "672": "Norfolk Island", "673": "Brunei",
+    "674": "Nauru", "675": "Papua New Guinea", "676": "Tonga",
+    "677": "Solomon Islands", "678": "Vanuatu", "679": "Fiji", "680": "Palau",
+    "681": "Wallis and Futuna", "682": "Cook Islands", "683": "Niue",
+    "685": "Samoa", "686": "Kiribati", "687": "New Caledonia", "688": "Tuvalu",
+    "689": "French Polynesia", "690": "Tokelau", "691": "Micronesia",
+    "692": "Marshall Islands",
+
+    "850": "North Korea", "852": "Hong Kong", "853": "Macau", "855": "Cambodia",
+    "856": "Laos", "880": "Bangladesh", "886": "Taiwan",
+
+    "960": "Maldives", "961": "Lebanon", "962": "Jordan", "963": "Syria",
+    "964": "Iraq", "965": "Kuwait", "966": "Saudi Arabia", "967": "Yemen",
+    "968": "Oman", "970": "Palestine", "971": "United Arab Emirates",
+    "972": "Israel", "973": "Bahrain", "974": "Qatar", "975": "Bhutan",
+    "976": "Mongolia", "977": "Nepal", "992": "Tajikistan",
+    "993": "Turkmenistan", "994": "Azerbaijan", "995": "Georgia",
+    "996": "Kyrgyzstan", "998": "Uzbekistan",
+}
+
+
+def get_country_from_phone(phone):
+    if not phone:
+        return None
+    digits = "".join(ch for ch in str(phone) if ch.isdigit())
+    if not digits:
+        return None
+    for length in (4, 3, 2, 1):
+        if len(digits) >= length:
+            prefix = digits[:length]
+            country = COUNTRY_CALLING_CODES.get(prefix)
+            if country:
+                return country
+    return None
+
+
+def get_activity_from_adapter(adapter):
+    try:
+        field = adapter.getClass().getDeclaredField("this$0")
+        field.setAccessible(True)
+        return field.get(adapter)
+    except Exception:
+        return None
+
+
+class ContactStatusUpdateRowsIdsHook(MethodHook):
+    def __init__(self, plugin):
+        self.plugin = plugin
+
+    @hook_filters(HookFilter.Condition("param.thisObject != null"))
+    def before_hooked_method(self, param):
+        activity = param.thisObject
+        state = self.plugin.contact_status_activity_state.setdefault(
+            activity, {"mutualRow": -1, "phoneRow": -1}
+        )
+
+        state["shouldInsertMutual"] = False
+        state["countryName"] = None
+
+        user = self._get_profile_user(activity)
+        if not user:
+            state["mutualRow"] = -1
+            return
+
+        if getattr(user, "mutual_contact", False):
+            state["shouldInsertMutual"] = True
+
+        phone = getattr(user, "phone", None)
+        country = get_country_from_phone(phone) if phone else None
+        if country:
+            state["countryName"] = country
+
+    @hook_filters(HookFilter.Condition("param.thisObject != null"))
+    def after_hooked_method(self, param):
+        activity = param.thisObject
+        state = self.plugin.contact_status_activity_state.get(activity)
+        if not state:
+            return
+
+        state["phoneRow"] = self._get_int_field(activity, "phoneRow")
+
+        insert_mutual = state.get("shouldInsertMutual", False)
+        state.pop("shouldInsertMutual", None)
+
+        if not insert_mutual:
+            state["mutualRow"] = -1
+            return
+
+        base_position = self._calculate_insert_position(activity)
+        if base_position == -1:
+            state["mutualRow"] = -1
+            return
+
+        position_cursor = base_position
+        num_new_rows = 0
+
+        if insert_mutual:
+            state["mutualRow"] = position_cursor
+            position_cursor += 1
+            num_new_rows += 1
+        else:
+            state["mutualRow"] = -1
+
+        if num_new_rows == 0:
+            return
+
+        row_count = self._get_int_field(activity, "rowCount")
+        if row_count != -1:
+            self._set_int_field(activity, "rowCount", row_count + num_new_rows)
+
+        try:
+            activity_class = activity.getClass()
+            fields = activity_class.getDeclaredFields()
+            for i in range(len(fields)):
+                field = fields[i]
+                name = field.getName()
+                if "Row" not in name and "row" not in name:
+                    continue
+                if name in ("rowCount", "phoneRow", "mutualRow"):
+                    continue
+                field_type = field.getType()
+                INTEGER_CLASS = jclass("java.lang.Integer")
+                if field_type != INTEGER_CLASS.TYPE and field_type != INTEGER_CLASS:
+                    continue
+                field.setAccessible(True)
+                value_obj = field.get(activity)
+                if value_obj is None:
+                    continue
+                try:
+                    value = int(value_obj)
+                except Exception:
+                    continue
+                if value >= base_position and value != -1:
+                    try:
+                        if field_type == INTEGER_CLASS.TYPE:
+                            field.setInt(activity, value + num_new_rows)
+                        else:
+                            field.set(activity, INTEGER_CLASS(value + num_new_rows))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _get_profile_user(self, activity):
+        try:
+            user_id = self._get_long_field(activity, "userId")
+            if user_id == 0:
+                return None
+            from org.telegram.messenger import MessagesController, UserConfig
+            account = UserConfig.selectedAccount
+            controller = MessagesController.getInstance(account)
+            if not controller:
+                return None
+            try:
+                user_id_int = int(user_id)
+            except Exception:
+                user_id_int = user_id
+            user = controller.getUser(user_id_int)
+            if user:
+                return user
+            user_full = self._get_object_field(activity, "userInfo")
+            if user_full and getattr(user_full, "user", None):
+                return user_full.user
+        except Exception:
+            return None
+
+    def _get_int_field(self, obj, name):
+        try:
+            field = obj.getClass().getDeclaredField(name)
+            field.setAccessible(True)
+            return field.getInt(obj)
+        except Exception:
+            return -1
+
+    def _set_int_field(self, obj, name, value):
+        try:
+            field = obj.getClass().getDeclaredField(name)
+            field.setAccessible(True)
+            field.setInt(obj, value)
+        except Exception:
+            pass
+
+    def _get_long_field(self, obj, name):
+        try:
+            field = obj.getClass().getDeclaredField(name)
+            field.setAccessible(True)
+            return field.getLong(obj)
+        except Exception:
+            return 0
+
+    def _get_object_field(self, obj, name):
+        try:
+            field = obj.getClass().getDeclaredField(name)
+            field.setAccessible(True)
+            return field.get(obj)
+        except Exception:
+            return None
+
+    def _calculate_insert_position(self, activity):
+        anchors = [
+            "phoneRow",
+        ]
+        for name in anchors:
+            value = self._get_int_field(activity, name)
+            if value != -1:
+                return value + 1
+
+        fallback_anchors = [
+            "bizHoursRow",
+            "bizLocationRow",
+            "usernameRow",
+            "userInfoRow",
+            "birthdayRow",
+            "infoHeaderRow",
+            "infoHeaderRowEmpty",
+        ]
+        for name in fallback_anchors:
+            value = self._get_int_field(activity, name)
+            if value != -1:
+                return value + 1
+
+        info_end_row = self._get_int_field(activity, "infoEndRow")
+        if info_end_row != -1:
+            return info_end_row + 1
+
+        return -1
+
+
+class ContactStatusListAdapterGetItemViewTypeHook(MethodHook):
+    def __init__(self, plugin):
+        self.plugin = plugin
+
+    @hook_filters(HookFilter.Condition("param.thisObject != null"), HookFilter.ArgumentNotNull(0))
+    def before_hooked_method(self, param):
+        adapter = param.thisObject
+        activity = get_activity_from_adapter(adapter)
+        state = self.plugin.contact_status_activity_state.get(activity) if self.plugin else None
+        if not state:
+            return
+        position_arg = param.args[0]
+        try:
+            position = int(position_arg)
+        except Exception:
+            position = position_arg
+        if position == state.get("mutualRow", -1):
+            try:
+                INTEGER_CLASS = jclass("java.lang.Integer")
+                param.setResult(INTEGER_CLASS(VIEW_TYPE_TEXT_DETAIL))
+            except Exception:
+                param.setResult(VIEW_TYPE_TEXT_DETAIL)
+
+
+class ContactStatusListAdapterBindViewHolderHook(MethodHook):
+    def __init__(self, plugin):
+        self.plugin = plugin
+
+    @hook_filters(HookFilter.ArgumentNotNull(0), HookFilter.ArgumentNotNull(1))
+    def after_hooked_method(self, param):
+        position_arg = param.args[1]
+        try:
+            position = int(position_arg)
+        except Exception:
+            position = position_arg
+        adapter = param.thisObject
+        activity = get_activity_from_adapter(adapter)
+        state = self.plugin.contact_status_activity_state.get(activity) if self.plugin else None
+        if not state:
+            return
+
+        is_mutual_row = position == state.get("mutualRow", -1)
+        is_phone_row = position == state.get("phoneRow", -1)
+        if not is_mutual_row and not is_phone_row:
+            return
+
+        try:
+            holder = param.args[0]
+            item_view = holder.itemView
+            from org.telegram.ui.Cells import TextDetailCell
+            if not isinstance(item_view, TextDetailCell):
+                return
+
+            if is_mutual_row:
+                item_view.setTextAndValue(
+                    "Mutual contact",
+                    "Both saved as contacts",
+                    True
+                )
+            elif is_phone_row:
+                country_name = state.get("countryName")
+                if country_name:
+                    new_label = "{}".format(country_name)
+                    self._relabel_phone_subtitle(item_view, new_label)
+        except Exception:
+            pass
+
+    def _relabel_phone_subtitle(self, item_view, new_label):
+        field = self._find_field_in_hierarchy(item_view, "valueTextView")
+        if field is None:
+            return False
+        try:
+            field.setAccessible(True)
+            view = field.get(item_view)
+            if view is None:
+                return False
+            view.setText(new_label)
+            return True
+        except Exception:
+            return False
+
+    def _find_field_in_hierarchy(self, obj, name):
+        klass = obj.getClass()
+        while klass is not None:
+            try:
+                return klass.getDeclaredField(name)
+            except Exception:
+                try:
+                    klass = klass.getSuperclass()
+                except Exception:
+                    return None
+        return None
+
+
+class ContactStatusInProfilePlugin(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self._class_cache = {}
+        self.contact_status_activity_state = {}
+        self.contact_status_update_rows_hook = None
+        self.contact_status_get_item_view_type_hook = None
+        self.contact_status_bind_view_holder_hook = None
+    
+    def _get_class(self, class_name):
+        if class_name not in self._class_cache:
+            self._class_cache[class_name] = find_class(class_name)
+        return self._class_cache[class_name]
+    
+    def on_plugin_load(self):
+        self._hook_contact_status_in_profile()
+    
+    def on_plugin_unload(self):
+        for hook_name in ['contact_status_update_rows_hook', 'contact_status_get_item_view_type_hook', 
+                          'contact_status_bind_view_holder_hook']:
+            hook = getattr(self, hook_name, None)
+            if hook:
+                try:
+                    self.unhook_method(hook)
+                except:
+                    pass
+                setattr(self, hook_name, None)
+        self.contact_status_activity_state.clear()
+    
+    def _hook_contact_status_in_profile(self):
+        try:
+            ProfileActivity = self._get_class("org.telegram.ui.ProfileActivity")
+            if not ProfileActivity:
+                return
+
+            java_class = ProfileActivity.getClass()
+
+            try:
+                update_rows = java_class.getDeclaredMethod("updateRowsIds")
+                update_rows.setAccessible(True)
+                self.contact_status_update_rows_hook = self.hook_method(
+                    update_rows,
+                    ContactStatusUpdateRowsIdsHook(self),
+                    priority=0,
+                )
+            except Exception:
+                pass
+
+            ListAdapter = self._get_class("org.telegram.ui.ProfileActivity$ListAdapter")
+            if not ListAdapter:
+                return
+
+            try:
+                int_type = jclass("java.lang.Integer").TYPE
+                view_holder = jclass("androidx.recyclerview.widget.RecyclerView$ViewHolder")
+
+                list_adapter_class = ListAdapter.getClass()
+
+                get_item_view_type = list_adapter_class.getDeclaredMethod("getItemViewType", int_type)
+                get_item_view_type.setAccessible(True)
+                self.contact_status_get_item_view_type_hook = self.hook_method(
+                    get_item_view_type,
+                    ContactStatusListAdapterGetItemViewTypeHook(self),
+                    priority=0,
+                )
+
+                on_bind_view_holder = list_adapter_class.getDeclaredMethod(
+                    "onBindViewHolder",
+                    view_holder,
+                    int_type,
+                )
+                on_bind_view_holder.setAccessible(True)
+                self.contact_status_bind_view_holder_hook = self.hook_method(
+                    on_bind_view_holder,
+                    ContactStatusListAdapterBindViewHolderHook(self),
+                    priority=0,
+                )
+            except Exception:
+                pass
+
+        except Exception:
+            pass
