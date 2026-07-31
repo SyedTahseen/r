@@ -113,10 +113,6 @@ COUNTRY_CALLING_CODES = {
     "996": "Kyrgyzstan", "998": "Uzbekistan",
 }
 
-# NANP area codes (NPA) currently assigned to Canada. Any +1 number whose
-# area code is NOT in this set is treated as the United States. This list
-# does not include the dedicated Caribbean country codes (1242, 1246, ...)
-# since those are already resolved earlier via the 4-digit lookup above.
 CANADA_AREA_CODES = {
     "204", "226", "236", "249", "250", "257", "263", "289",
     "306", "343", "354", "365", "367", "368", "382",
@@ -129,9 +125,6 @@ CANADA_AREA_CODES = {
     "902", "905",
 }
 
-# Digits that immediately follow +7 and belong to Kazakhstan's numbering
-# zone (fixed-line zone codes 6xx/7xx, plus legacy 0xx). Any other leading
-# digit (3, 4, 5, 8, 9) is Russia.
 KAZAKHSTAN_LEADING_DIGITS = {"0", "6", "7"}
 
 
@@ -155,7 +148,6 @@ def get_country_from_phone(phone):
             return "Canada"
         if len(digits) >= 4:
             return "United States"
-        # Not enough digits to be sure yet; fall back to the generic label.
         return COUNTRY_CALLING_CODES.get("1")
 
     if digits.startswith("7"):
