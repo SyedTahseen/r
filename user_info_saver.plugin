@@ -1,9 +1,14 @@
+import os
+import json
+import zlib
+import logging
 from typing import Union, Optional
 
+import file_utils
 from base_plugin import BasePlugin, MethodReplacement, MethodHook
 from hook_utils import get_private_field
-from client_utils import get_messages_controller, run_on_queue, get_last_fragment
-from ui.bulletin import BulletinHelper
+from client_utils import get_messages_controller
+from android_utils import log as _internal_log
 
 from java import jclass
 from org.telegram.tgnet import TLRPC
@@ -13,79 +18,133 @@ __name__ = "UserInfoSaver"
 __icon__ = "zwyPluginsIcons/7"
 __description__ = (
     "Saves user's short info (phone country, registration date, etc) before server doesn't return it more.\n\n"
-    "> Requires **[ZwyLib](https://t.me/zwyPlugins/48)** v2.0.2 or greater!"
+    "Standalone build \u2014 does not require ZwyLib."
 )
 __author__ = "@zwylair"
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __min_version__ = "12.0.1"
 
-REQUIRED_ZWYLIB_VERSION = "2.0.2"
 
+# ---------------------------------------------------------------------------
+# Standalone replacements for the bits this plugin used to borrow from ZwyLib
+# ---------------------------------------------------------------------------
 
-try:
-    import zwylib
+class _CustomLogger(logging.Logger):
+    def _log(self, level, msg, args, exc_info=None, extra=None, stack_info=False, stacklevel=1):
+        level_name = logging.getLevelName(level)
+        prefix = f"[{level_name}] [{self.name}]"
+        formatted_msg = f"{msg} {' '.join(map(str, args))}".strip()
+        final_output = f"{prefix} {formatted_msg}"
 
-    if (
-            not hasattr(zwylib, "is_zwylib_version_sufficient")
-            or not zwylib.is_zwylib_version_sufficient(__name__, REQUIRED_ZWYLIB_VERSION, notify=False)
-    ):
-        raise Exception("!!!")
-
-    from zwylib import SettingEntry
-except Exception as _e:
-    class RecursiveMock:
-        def __call__(self, *args, **kwargs): return self
-        def __getattr__(self, _): return self
-        def __getitem__(self, _): return self
-        def __iter__(self): return iter([])
-        def __str__(self): return ""
-        def __repr__(self): return ""
-        def __bool__(self): return False
-        def __mro_entries__(self, bases): return ()
-
-    zwylib = RecursiveMock()
-    SettingEntry = RecursiveMock()
-
-    l = {
-        "en": {
-            "exc_text": "ZwyLib plugin required for this plugin is not found!",
-            "not_sufficient_zwylib": f"{__name__} requires {REQUIRED_ZWYLIB_VERSION}+ version of ZwyLib!",
-            "download": "Install",
-        },
-        "ru": {
-            "exc_text": "Для корректной работы требуется плагин ZwyLib!",
-            "not_sufficient_zwylib": f"Для работы {__name__} требуется {REQUIRED_ZWYLIB_VERSION}+ версия ZwyLib!",
-            "download": "Установить",
-        },
-        "uk": {
-            "exc_text": "Для коректної роботи потрібен плагін ZwyLib!",
-            "not_sufficient_zwylib": f"Для роботи {__name__} потрібна {REQUIRED_ZWYLIB_VERSION}+ версія ZwyLib!",
-            "download": "Встановити",
-        },
-    }
-    l_dict = l.get(
-        jclass("org.telegram.messenger.LocaleController").getInstance().getCurrentLocaleInfo().pluralLangCode,
-        l.get("en")
-    )
-    err_text = f"{__name__}: " + l_dict["not_sufficient_zwylib" if "!!!" in str(_e) else "exc_text"]
-
-    def force_stop():
-        BulletinHelper.show_with_button(
-            err_text, jclass("org.telegram.messenger.R").raw.error, l_dict["download"],
-            on_click=lambda: get_last_fragment().presentFragment(
-                jclass("org.telegram.ui.ChatActivity").of(-2521243181, 48)
+        if exc_info:
+            import traceback
+            tb = traceback.format_exc() if exc_info is True else "".join(
+                traceback.format_exception(type(exc_info), exc_info, exc_info.__traceback__)
             )
-        )
+            final_output += f"\n{tb.strip()}"
 
-        p = jclass("com.exteragram.messenger.plugins.PluginsController").getInstance().plugins.get(__id__)
-        p.setError(jclass("java.lang.Exception")(err_text))
-        p.setEnabled(False)
+        _internal_log(final_output)
 
-    class EmptyPlugin(BasePlugin):
-        pass
 
-    run_on_queue(force_stop, delay=50)
+def build_log(plugin_name: str, level=logging.NOTSET) -> logging.Logger:
+    manager = logging.Logger.manager
 
+    if plugin_name in manager.loggerDict:
+        old_logger = manager.loggerDict[plugin_name]
+        if hasattr(old_logger, "handlers"):
+            old_logger.handlers.clear()
+        del manager.loggerDict[plugin_name]
+
+    logging.setLoggerClass(_CustomLogger)
+    new_logger = logging.getLogger(plugin_name)
+    if level != logging.NOTSET:
+        new_logger.setLevel(level)
+    if not isinstance(new_logger, _CustomLogger):
+        new_logger.__class__ = _CustomLogger
+    return new_logger
+
+
+class JsonCacheFile:
+    """Minimal standalone stand-in for zwylib.JsonCacheFile."""
+
+    def __init__(self, filename: str, default, compress: bool = False):
+        self._default = default
+        self.compress = compress
+
+        plugins_dir = file_utils.get_plugins_dir()
+        cache_dir = os.path.join(plugins_dir, "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        self.path = os.path.join(cache_dir, filename)
+
+        self.json_content = self._read()
+
+    def _read(self):
+        if not os.path.exists(self.path):
+            return json.loads(json.dumps(self._default))
+
+        try:
+            with open(self.path, "rb") as f:
+                raw = f.read()
+
+            if not raw:
+                return json.loads(json.dumps(self._default))
+
+            is_zlib = (
+                len(raw) >= 2
+                and (raw[0] & 0x0F) == 8
+                and (raw[0] * 256 + raw[1]) % 31 == 0
+            )
+            if is_zlib:
+                try:
+                    raw = zlib.decompress(raw)
+                except zlib.error:
+                    logger.error("Failed to decompress cache file, resetting.", exc_info=True)
+                    return json.loads(json.dumps(self._default))
+
+            return json.loads(raw.decode("utf-8", errors="replace"))
+        except Exception:
+            logger.error(f"Failed to load data from '{self.path}':", exc_info=True)
+            return json.loads(json.dumps(self._default))
+
+    def write(self):
+        try:
+            data = json.dumps(self.content).encode("utf-8")
+            if self.compress:
+                data = zlib.compress(data, level=6)
+            with open(self.path, "wb") as f:
+                f.write(data)
+        except Exception:
+            logger.error(f"Failed to write data to '{self.path}':", exc_info=True)
+
+    @property
+    def content(self):
+        return self.json_content
+
+    @content.setter
+    def content(self, value):
+        self.json_content = value
+
+
+def hook_max_args_overload(plugin_instance, clazz, method_name: str, hook_instance):
+    """Standalone stand-in for zwylib.hook_max_args_method: hooks the overload
+    of `method_name` with the most parameters."""
+    method = max(
+        [m for m in clazz.getDeclaredMethods() if m.getName() == method_name],
+        key=lambda m: m.getParameterCount(),
+        default=None,
+    )
+
+    if not method:
+        logger.warning(f"Failed to hook {method_name}: no matching method found.")
+        return
+
+    method.setAccessible(True)
+    plugin_instance.hook_method(method, hook_instance)
+
+
+# ---------------------------------------------------------------------------
+# Original plugin logic
+# ---------------------------------------------------------------------------
 
 def settings_has_necessary_field(settings: Optional[TLRPC.TL_peerSettings | dict]) -> bool:
     if isinstance(settings, dict):
@@ -174,22 +233,17 @@ class LoadPeerSettings(MethodReplacement):
             logger.error("An error occurred:", exc_info=True)
 
 
-AUTOUPDATE_CHANNEL_ID = 2521243181
-AUTOUPDATE_MSG_ID = 100
-
 PRECIOUS_FIELDS = ("registration_month", "phone_country", "name_change_date", "photo_change_date")
 
-storage = zwylib.JsonCacheFile("zwyUserInfoSaver__peer_settings_storage", default={}, compress=True)
-logger = zwylib.build_log(__name__)
+storage = JsonCacheFile("zwyUserInfoSaver__peer_settings_storage", default={}, compress=True)
+logger = build_log(__name__)
 
 
 class UserInfoSaver(BasePlugin):
     def on_plugin_load(self):
         clazz = jclass("org.telegram.messenger.MessagesController").getClass()
-        zwylib.hook_max_args_method(clazz, "getPeerSettings", LoadPeerSettings())
-        zwylib.hook_max_args_method(clazz, "savePeerSettings", SavePeerSettings())
-
-        zwylib.add_autoupdater_task(AUTOUPDATE_CHANNEL_ID, AUTOUPDATE_MSG_ID)
+        hook_max_args_overload(self, clazz, "getPeerSettings", LoadPeerSettings())
+        hook_max_args_overload(self, clazz, "savePeerSettings", SavePeerSettings())
 
         logger.info("Loaded.")
 
