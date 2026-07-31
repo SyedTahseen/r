@@ -17,17 +17,12 @@ from ui.alert import AlertDialogBuilder
 from ui.settings import Header, Divider, Text, Switch
 from hook_utils import get_private_field
 
-DEBUG_TRANSLATION_LOGS = False
+DEBUG_TRANSLATION_LOGS = True
 
 _session = None
-# 50 workers meant up to 50 concurrent network requests could fire at once
-# (e.g. on opening a chat with "Translate Entire Chat" on), each completion
-# triggering its own UI refresh - this was the main source of UI stutter.
-# 8 is plenty for network-bound translation calls without hammering the
-# device/network or the translation endpoint.
-_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="translator_")
+_executor = ThreadPoolExecutor(max_workers=50, thread_name_prefix="translator_")
 
-CACHE_DIR = os.path.expanduser("~/.exteragram_translatorplus_cache")
+CACHE_DIR = os.path.expanduser("~/.ayugram_plugin_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 TRANSLATIONS_CACHE_FILE = os.path.join(CACHE_DIR, "translations_cache.json")
 
@@ -141,52 +136,20 @@ def _get_telegram_target_language():
     return "en"
 
 
-_ui_refresh_lock = threading.Lock()
-_ui_refresh_timer = None
-_UI_REFRESH_DEBOUNCE_SECONDS = 0.25
-
-
 def _post_ui_refresh(account=None):
-    """Centralized UI refresh notification.
-
-    Debounced (trailing edge) so that many translations completing in a
-    short window - e.g. "Translate Entire Chat" firing off a batch of
-    messages at once - collapse into a single NotificationCenter broadcast
-    instead of one full-interface refresh per message, which is what was
-    causing the chat UI to stutter/lag.
-    """
-    global _ui_refresh_timer
-
-    def _do_refresh():
-        global _ui_refresh_timer
-        with _ui_refresh_lock:
-            _ui_refresh_timer = None
-        try:
-            acc = account
-            if acc is None:
-                messages_controller = get_messages_controller()
-                if not messages_controller:
-                    return
-                acc = messages_controller.getCurrentAccount()
-
-            def ui():
-                try:
-                    NotificationCenter.getInstance(acc).postNotificationName(
-                        NotificationCenter.updateInterfaces, JInteger(4)
-                    )
-                except Exception as e:
-                    debug_log(f"[UI] Failed to post refresh: {e}")
-
-            run_on_ui_thread(ui)
-        except Exception as e:
-            debug_log(f"[UI] Failed to schedule refresh: {e}")
-
-    with _ui_refresh_lock:
-        if _ui_refresh_timer is not None:
-            _ui_refresh_timer.cancel()
-        _ui_refresh_timer = threading.Timer(_UI_REFRESH_DEBOUNCE_SECONDS, _do_refresh)
-        _ui_refresh_timer.daemon = True
-        _ui_refresh_timer.start()
+    """Centralized UI refresh notification"""
+    try:
+        if account is None:
+            messages_controller = get_messages_controller()
+            if messages_controller:
+                account = messages_controller.getCurrentAccount()
+            else:
+                return
+        NotificationCenter.getInstance(account).postNotificationName(
+            NotificationCenter.updateInterfaces, JInteger(4)
+        )
+    except Exception as e:
+        debug_log(f"[UI] Failed to post refresh: {e}")
 
 
 def _get_translate_controller():
@@ -245,7 +208,7 @@ def _clear_native_translations():
 
 
 def _clear_translation_cache_with_native(view):
-    global _in_message_translated, _translation_cache
+    global _in_message_translated
     try:
         cache_size = get_cache_size()
         entry_count = get_cache_entry_count()
@@ -255,7 +218,6 @@ def _clear_translation_cache_with_native(view):
             BulletinHelper.show_success(f"Cache cleared! Removed {entry_count} entries (~{cache_size:.1f}KB)")
         else:
             BulletinHelper.show_info("Translation cache is already empty")
-        _translation_cache = {}
         _in_message_translated.clear()
     except Exception as e:
         log(f"Failed to clear translation cache: {e}")
@@ -289,8 +251,7 @@ def _init_in_message_classes():
             'CM': jclass("org.telegram.ui.Cells.ChatMessageCell"),
         })
         return True
-    except Exception as e:
-        debug_log(f"[IN-MESSAGE] Failed to init classes: {e}")
+    except:
         return False
 
 
@@ -309,6 +270,14 @@ def _translate_with_google(text: str, target_lang: str) -> Optional[str]:
     except Exception as e:
         debug_log(f"[GOOGLE] {str(e)[:40]}")
     return None
+
+
+def _translate_with_google_async(text: str, target_lang: str, callback: Callable):
+    def task():
+        translated = _translate_with_google(text, target_lang)
+        if translated:
+            callback(translated)
+    threading.Thread(target=task, daemon=True).start()
 
 
 def _cached_translate(text: str, target_lang: str, log_prefix: str = "") -> Optional[str]:
@@ -369,18 +338,6 @@ def _create_text_with_entities(text: str):
     return te
 
 
-def _translate_and_apply_in_message(text: str, lang: str, obj, activity):
-    """Runs on the shared executor: reuses the same cache as entire-chat
-    translation (previously in-message translation always hit the network
-    directly and never benefited from - or contributed to - the cache)."""
-    translated = safe_execute(
-        lambda: _cached_translate(text, lang, log_prefix="[IN-MSG] "),
-        "[IN-MSG] translation failed"
-    )
-    if translated:
-        apply_in_message_translation(obj, activity, translated, lang)
-
-
 def apply_in_message_translation(msg, activity, txt, lang):
     try:
         mo = msg.messageOwner
@@ -414,12 +371,12 @@ def apply_in_message_translation(msg, activity, txt, lang):
                 adapter = get_private_field(activity, "chatAdapter")
                 if adapter:
                     adapter.notifyDataSetChanged()
-            except Exception as e:
-                debug_log(f"[IN-MSG] Failed to apply translation to UI: {e}")
+            except:
+                pass
 
         run_on_ui_thread(ui)
-    except Exception as e:
-        debug_log(f"[IN-MSG] apply_in_message_translation failed: {e}")
+    except:
+        pass
 
 
 class BlockRevertHook(MethodHook):
@@ -429,8 +386,8 @@ class BlockRevertHook(MethodHook):
             if (m and (m.getDialogId(), m.getId()) in _in_message_translated 
                 and m.translated and m.messageOwner and m.messageOwner.translatedText):
                 p.setResult(False)
-        except Exception as e:
-            debug_log(f"[IN-MSG] BlockRevertHook failed: {e}")
+        except:
+            pass
 
 
 class InMessageAlertHook(MethodHook):
@@ -459,10 +416,10 @@ class InMessageAlertHook(MethodHook):
                 return
             
             lang = _in_message_classes['TA'].getToLanguage()
-            _executor.submit(_translate_and_apply_in_message, str(txt), lang, obj, f)
+            _translate_with_google_async(str(txt), lang, lambda r: apply_in_message_translation(obj, f, r, lang))
             self.pending = True
-        except Exception as e:
-            debug_log(f"[IN-MSG] showAlert hook failed: {e}")
+        except:
+            pass
 
     def after_hooked_method(self, p):
         if self.pending:
@@ -857,6 +814,6 @@ __name__ = "TranslatorPlus"
 __description__ = "Ultra-fast multi-provider translation for Telegram with in-message support"
 __icon__ = "luvztroyicons/1"
 __id__ = "translatorplus"
-__version__ = "1.4.4"
+__version__ = "1.4.3"
 __author__ = "@xwvux"
 __min_version__ = "11.12.0"
