@@ -17,7 +17,7 @@ from ui.settings import Header, Divider, Text, Switch
 from hook_utils import get_private_field
 
 _session = None
-_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="translator_")
+_executor = ThreadPoolExecutor(max_workers=30, thread_name_prefix="translator_")
 
 CACHE_DIR = os.path.expanduser("~/.exteragram_translatorplus_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
