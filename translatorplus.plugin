@@ -230,6 +230,15 @@ def _clear_translation_cache_with_native(view):
             BulletinHelper.show_info("Translation cache is already empty")
         _translation_cache = {}
         _in_message_translated.clear()
+        if _plugin_instance:
+            safe_execute(
+                lambda: _plugin_instance.set_setting(
+                    "enable_entire_chat_translation",
+                    _plugin_instance.get_setting("enable_entire_chat_translation", False),
+                    reload_settings=True
+                ),
+                "[CACHE] Failed to refresh settings screen"
+            )
     except Exception as e:
         log(f"Failed to clear translation cache: {e}")
         BulletinHelper.show_error(f"Failed to clear cache: {str(e)}")
@@ -593,11 +602,11 @@ class AdvancedTranslatorPlugin(BasePlugin, LocalPremiumHook):
             "[TranslateToggle] Failed to sync with Telegram native toggle"
         )
         self._toggle_premium_hooks(value)
-        self.reload_settings()
+        self.set_setting("enable_entire_chat_translation", value, reload_settings=True)
 
     def _on_in_message_toggle(self, value):
         self._setup_in_message_hooks()
-        self.reload_settings()
+        self.set_setting("enable_in_message_translation", value, reload_settings=True)
 
     def create_settings(self):
         current_lang_code = _get_telegram_target_language()
