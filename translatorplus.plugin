@@ -9,15 +9,12 @@ import threading
 from typing import Any, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor
 
-from base_plugin import BasePlugin, MethodReplacement, HookResult, HookStrategy, MethodHook
+from base_plugin import BasePlugin, MethodReplacement, HookResult, MethodHook
 from client_utils import get_messages_controller, get_last_fragment
 from android_utils import run_on_ui_thread, log
 from ui.bulletin import BulletinHelper
-from ui.alert import AlertDialogBuilder
 from ui.settings import Header, Divider, Text, Switch
 from hook_utils import get_private_field
-
-DEBUG_TRANSLATION_LOGS = False
 
 _session = None
 _executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="translator_")
@@ -41,17 +38,12 @@ _in_message_translated = set()
 _in_message_classes = {}
 
 
-def debug_log(message: str):
-    if DEBUG_TRANSLATION_LOGS:
-        log(message)
-
-
 def safe_execute(func: Callable, error_prefix: str = "", default=None):
     try:
         return func()
     except Exception as e:
         if error_prefix:
-            debug_log(f"{error_prefix}: {e}")
+            log(f"{error_prefix}: {e}")
         return default
 
 
@@ -125,7 +117,7 @@ def _get_telegram_target_language():
                 if dialog_lang:
                     return dialog_lang
     except Exception as e:
-        debug_log(f"[LANG] Failed to read dialog language: {e}")
+        log(f"[LANG] Failed to read dialog language: {e}")
     
     try:
         telegram_lang = MessagesController.getGlobalMainSettings().getString("translate_to_language", None)
@@ -154,7 +146,7 @@ def _post_ui_refresh(account=None):
                 messages_controller = get_messages_controller()
                 if not messages_controller:
                     return
-                acc = messages_controller.getCurrentAccount()
+                acc = messages_controller.currentAccount
 
             def ui():
                 try:
@@ -162,11 +154,11 @@ def _post_ui_refresh(account=None):
                         NotificationCenter.updateInterfaces, JInteger(4)
                     )
                 except Exception as e:
-                    debug_log(f"[UI] Failed to post refresh: {e}")
+                    log(f"[UI] Failed to post refresh: {e}")
 
             run_on_ui_thread(ui)
         except Exception as e:
-            debug_log(f"[UI] Failed to schedule refresh: {e}")
+            log(f"[UI] Failed to schedule refresh: {e}")
 
     with _ui_refresh_lock:
         if _ui_refresh_timer is not None:
@@ -182,7 +174,7 @@ def _get_translate_controller():
         if messages_controller:
             return messages_controller.getTranslateController()
     except Exception as e:
-        debug_log(f"[SHIMMER] Failed to get translate controller: {e}")
+        log(f"[SHIMMER] Failed to get translate controller: {e}")
     return None
 
 
@@ -202,7 +194,7 @@ def _set_translation_loading(msg_id, loading):
                 loading_set.remove(key)
             _post_ui_refresh()
         except Exception as e:
-            debug_log(f"[SHIMMER] Failed to {'mark' if loading else 'unmark'} loading for {msg_id}: {e}")
+            log(f"[SHIMMER] Failed to {'mark' if loading else 'unmark'} loading for {msg_id}: {e}")
     run_on_ui_thread(task)
 
 
@@ -271,7 +263,7 @@ def _init_in_message_classes():
         })
         return True
     except Exception as e:
-        debug_log(f"[IN-MESSAGE] Failed to init classes: {e}")
+        log(f"[IN-MESSAGE] Failed to init classes: {e}")
         return False
 
 
@@ -288,33 +280,26 @@ def _translate_with_google(text: str, target_lang: str) -> Optional[str]:
         if result and isinstance(result, list) and result[0] and isinstance(result[0], list):
             return result[0][0]
     except Exception as e:
-        debug_log(f"[GOOGLE] {str(e)[:40]}")
+        log(f"[GOOGLE] {str(e)[:40]}")
     return None
 
 
-def _cached_translate(text: str, target_lang: str, log_prefix: str = "") -> Optional[str]:
+def _cached_translate(text: str, target_lang: str) -> Optional[str]:
     cache_key = get_cache_key(text, target_lang)
     cache_data = load_cache()
 
     if cache_key in cache_data:
-        debug_log(f"{log_prefix}[CACHE HIT]")
         return cache_data[cache_key]
 
     if not is_online():
-        debug_log(f"{log_prefix}[OFFLINE] Skipping translation...")
         return None
 
-    start_time = time.time()
     translated_text = _translate_with_google(text, target_lang)
-    elapsed = time.time() - start_time
-
     if not translated_text:
-        debug_log(f"{log_prefix}[FAIL] GOOGLE in {elapsed:.2f}s")
         return None
 
     cache_data[cache_key] = translated_text
     save_cache(cache_data)
-    debug_log(f"{log_prefix}[GOOGLE] {elapsed:.2f}s")
     return translated_text
 
 
@@ -344,7 +329,7 @@ def _create_text_with_entities(text: str):
 
 def _translate_and_apply_in_message(text: str, lang: str, obj, activity):
     translated = safe_execute(
-        lambda: _cached_translate(text, lang, log_prefix="[IN-MSG] "),
+        lambda: _cached_translate(text, lang),
         "[IN-MSG] translation failed"
     )
     if translated:
@@ -385,11 +370,11 @@ def apply_in_message_translation(msg, activity, txt, lang):
                 if adapter:
                     adapter.notifyDataSetChanged()
             except Exception as e:
-                debug_log(f"[IN-MSG] Failed to apply translation to UI: {e}")
+                log(f"[IN-MSG] Failed to apply translation to UI: {e}")
 
         run_on_ui_thread(ui)
     except Exception as e:
-        debug_log(f"[IN-MSG] apply_in_message_translation failed: {e}")
+        log(f"[IN-MSG] apply_in_message_translation failed: {e}")
 
 
 class BlockRevertHook(MethodHook):
@@ -400,7 +385,7 @@ class BlockRevertHook(MethodHook):
                 and m.translated and m.messageOwner and m.messageOwner.translatedText):
                 p.setResult(False)
         except Exception as e:
-            debug_log(f"[IN-MSG] BlockRevertHook failed: {e}")
+            log(f"[IN-MSG] BlockRevertHook failed: {e}")
 
 
 class InMessageAlertHook(MethodHook):
@@ -432,7 +417,7 @@ class InMessageAlertHook(MethodHook):
             _executor.submit(_translate_and_apply_in_message, str(txt), lang, obj, f)
             self.pending = True
         except Exception as e:
-            debug_log(f"[IN-MSG] showAlert hook failed: {e}")
+            log(f"[IN-MSG] showAlert hook failed: {e}")
 
     def after_hooked_method(self, p):
         if self.pending:
@@ -501,7 +486,6 @@ class AdvancedTranslatorPlugin(BasePlugin, LocalPremiumHook):
             log(f"Translator [FATAL]: An exception occurred during hooking: {traceback.format_exc()}")
             BulletinHelper.show_error("Translator: An error occurred while hooking.")
         
-        self.add_on_send_message_hook()
         self._setup_in_message_hooks()
 
     def _toggle_premium_hooks(self, enable: bool):
@@ -535,16 +519,6 @@ class AdvancedTranslatorPlugin(BasePlugin, LocalPremiumHook):
         _in_message_translated.clear()
         log("[IN-MESSAGE] Hooks disabled")
 
-    def on_send_message_hook(self, account, params):
-        global DEBUG_TRANSLATION_LOGS
-        if not hasattr(params, "message") or not isinstance(params.message, str):
-            return None
-        if params.message.strip().lower() == "!debug":
-            DEBUG_TRANSLATION_LOGS = not DEBUG_TRANSLATION_LOGS
-            BulletinHelper.show_info(f"Translation debug logs {'ENABLED' if DEBUG_TRANSLATION_LOGS else 'DISABLED'}")
-            return HookResult(strategy=HookStrategy.CANCEL)
-        return None
-
     def on_plugin_unload(self):
         self._teardown_in_message_hooks()
         log("Unloaded")
@@ -555,7 +529,7 @@ class AdvancedTranslatorPlugin(BasePlugin, LocalPremiumHook):
                 if self.get_setting("enable_entire_chat_translation", False):
                     self._maybe_prefetch_live_translation(update)
         except Exception as e:
-            debug_log(f"[LIVE] on_update_hook error: {e}")
+            log(f"[LIVE] on_update_hook error: {e}")
         return HookResult()
 
     def _maybe_prefetch_live_translation(self, update):
@@ -596,7 +570,7 @@ class AdvancedTranslatorPlugin(BasePlugin, LocalPremiumHook):
 
     def _translate_live_message(self, text, message_key, target_lang, msg):
         try:
-            translated = _cached_translate(text, target_lang, log_prefix="[LIVE]")
+            translated = _cached_translate(text, target_lang)
             if translated:
                 def ui_update():
                     try:
@@ -608,7 +582,7 @@ class AdvancedTranslatorPlugin(BasePlugin, LocalPremiumHook):
 
                 run_on_ui_thread(ui_update)
         except Exception as e:
-            debug_log(f"[LIVE] translation failed: {e}")
+            log(f"[LIVE] translation failed: {e}")
         finally:
             in_progress_messages.discard(message_key)
             _set_translation_loading(msg.id, False)
@@ -673,24 +647,6 @@ class TranslateHook(MethodReplacement):
     def cleanup(self):
         log(f"[PLUGIN] TranslateHook.cleanup: (gen {self._generation}).")
 
-    def _show_error_dialog(self, message: str):
-        fragment = get_last_fragment()
-        if not fragment or not fragment.getParentActivity():
-            return
-        
-        builder = AlertDialogBuilder(fragment.getParentActivity())
-        builder.set_title("Translator Error")
-        builder.set_message(message)
-        
-        def on_copy_error_click(b, w):
-            jclass("org.telegram.messenger.AndroidUtilities").addToClipboard(message)
-            BulletinHelper.show_info("copied_to_clipboard")
-            b.dismiss()
-        
-        builder.set_negative_button("close_button", lambda b, w: b.dismiss())
-        builder.set_positive_button("copy_button", on_copy_error_click)
-        builder.show()
-
     def replace_hooked_method(self, param: Any) -> Any:
         try:
             message_object = param.args[0]
@@ -704,7 +660,6 @@ class TranslateHook(MethodReplacement):
             target_lang = _get_telegram_target_language()
             if (hasattr(mo, "translatedText") and mo.translatedText and
                 hasattr(mo, "translatedToLanguage") and mo.translatedToLanguage == target_lang):
-                debug_log(f"[SKIP] Already translated to {target_lang}")
                 return None
             
             original_text = _get_valid_text(message_object)
@@ -716,7 +671,6 @@ class TranslateHook(MethodReplacement):
                 return None
             
             if is_already_translated(original_text, target_lang):
-                debug_log(f"[SKIP] Already {target_lang}")
                 return None
             
             _begin_tracking(message_key, message_object.getId())
@@ -727,12 +681,8 @@ class TranslateHook(MethodReplacement):
 
     def _handle_error(self, e: Exception, context: str):
         if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ReadTimeout)):
-            debug_log(f"[OFFLINE] Translation unavailable ({context})")
             return
-        error_message = f"Translator Error ({context}):\n\n{type(e).__name__}: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        log(error_message)
-        if DEBUG_TRANSLATION_LOGS:
-            run_on_ui_thread(lambda: self._show_error_dialog(error_message))
+        log(f"Translator Error ({context}): {type(e).__name__}: {e}\n{traceback.format_exc()}")
 
     def _process_translation(self, original_text: str, message_key: str, target_lang_code: str, message_object):
         try:
