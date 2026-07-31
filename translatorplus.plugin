@@ -17,12 +17,12 @@ from ui.alert import AlertDialogBuilder
 from ui.settings import Header, Divider, Text, Switch
 from hook_utils import get_private_field
 
-DEBUG_TRANSLATION_LOGS = True
+DEBUG_TRANSLATION_LOGS = False
 
 _session = None
-_executor = ThreadPoolExecutor(max_workers=50, thread_name_prefix="translator_")
+_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="translator_")
 
-CACHE_DIR = os.path.expanduser("~/.ayugram_plugin_cache")
+CACHE_DIR = os.path.expanduser("~/.exteragram_translatorplus_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 TRANSLATIONS_CACHE_FILE = os.path.join(CACHE_DIR, "translations_cache.json")
 
@@ -136,20 +136,44 @@ def _get_telegram_target_language():
     return "en"
 
 
+_ui_refresh_lock = threading.Lock()
+_ui_refresh_timer = None
+_UI_REFRESH_DEBOUNCE_SECONDS = 0.25
+
+
 def _post_ui_refresh(account=None):
-    """Centralized UI refresh notification"""
-    try:
-        if account is None:
-            messages_controller = get_messages_controller()
-            if messages_controller:
-                account = messages_controller.getCurrentAccount()
-            else:
-                return
-        NotificationCenter.getInstance(account).postNotificationName(
-            NotificationCenter.updateInterfaces, JInteger(4)
-        )
-    except Exception as e:
-        debug_log(f"[UI] Failed to post refresh: {e}")
+    global _ui_refresh_timer
+
+    def _do_refresh():
+        global _ui_refresh_timer
+        with _ui_refresh_lock:
+            _ui_refresh_timer = None
+        try:
+            acc = account
+            if acc is None:
+                messages_controller = get_messages_controller()
+                if not messages_controller:
+                    return
+                acc = messages_controller.getCurrentAccount()
+
+            def ui():
+                try:
+                    NotificationCenter.getInstance(acc).postNotificationName(
+                        NotificationCenter.updateInterfaces, JInteger(4)
+                    )
+                except Exception as e:
+                    debug_log(f"[UI] Failed to post refresh: {e}")
+
+            run_on_ui_thread(ui)
+        except Exception as e:
+            debug_log(f"[UI] Failed to schedule refresh: {e}")
+
+    with _ui_refresh_lock:
+        if _ui_refresh_timer is not None:
+            _ui_refresh_timer.cancel()
+        _ui_refresh_timer = threading.Timer(_UI_REFRESH_DEBOUNCE_SECONDS, _do_refresh)
+        _ui_refresh_timer.daemon = True
+        _ui_refresh_timer.start()
 
 
 def _get_translate_controller():
@@ -163,12 +187,6 @@ def _get_translate_controller():
 
 
 def _set_translation_loading(msg_id, loading):
-    """Mark/unmark a message id in TranslateController's own 'loadingTranslations'
-    set - this is what ChatMessageCell checks (via isTranslating()) to decide
-    whether to draw the native shimmer. Since our hook fully replaces
-    pushToTranslate, native code never populates this set on its own, so we do
-    it ourselves. Always mutated on the UI thread since ChatMessageCell reads
-    it there too."""
     def task():
         try:
             translate_controller = _get_translate_controller()
@@ -208,7 +226,7 @@ def _clear_native_translations():
 
 
 def _clear_translation_cache_with_native(view):
-    global _in_message_translated
+    global _in_message_translated, _translation_cache
     try:
         cache_size = get_cache_size()
         entry_count = get_cache_entry_count()
@@ -218,6 +236,7 @@ def _clear_translation_cache_with_native(view):
             BulletinHelper.show_success(f"Cache cleared! Removed {entry_count} entries (~{cache_size:.1f}KB)")
         else:
             BulletinHelper.show_info("Translation cache is already empty")
+        _translation_cache = {}
         _in_message_translated.clear()
     except Exception as e:
         log(f"Failed to clear translation cache: {e}")
@@ -251,7 +270,8 @@ def _init_in_message_classes():
             'CM': jclass("org.telegram.ui.Cells.ChatMessageCell"),
         })
         return True
-    except:
+    except Exception as e:
+        debug_log(f"[IN-MESSAGE] Failed to init classes: {e}")
         return False
 
 
@@ -272,19 +292,7 @@ def _translate_with_google(text: str, target_lang: str) -> Optional[str]:
     return None
 
 
-def _translate_with_google_async(text: str, target_lang: str, callback: Callable):
-    def task():
-        translated = _translate_with_google(text, target_lang)
-        if translated:
-            callback(translated)
-    threading.Thread(target=task, daemon=True).start()
-
-
 def _cached_translate(text: str, target_lang: str, log_prefix: str = "") -> Optional[str]:
-    """Look up a translation in the on-disk cache, falling back to a live
-    Google request and persisting the result. Shared by both the entire-chat
-    hook and the live-message prefetch path so the cache/online/save
-    sequence only lives in one place."""
     cache_key = get_cache_key(text, target_lang)
     cache_data = load_cache()
 
@@ -311,14 +319,11 @@ def _cached_translate(text: str, target_lang: str, log_prefix: str = "") -> Opti
 
 
 def _begin_tracking(message_key: str, msg_id: int):
-    """Mark a translation job as in-progress and switch on the native
-    shimmer. Shared by the entire-chat hook and the live-message path."""
     in_progress_messages.add(message_key)
     _set_translation_loading(msg_id, True)
 
 
 def _get_valid_text(message_object) -> Optional[str]:
-    """Extract valid text from message object - centralized validation"""
     original_text = message_object.messageText
     if not original_text or not isinstance(original_text, str) or not original_text.strip():
         mo = getattr(message_object, "messageOwner", None)
@@ -331,11 +336,19 @@ def _get_valid_text(message_object) -> Optional[str]:
 
 
 def _create_text_with_entities(text: str):
-    """Create TLRPC.TL_textWithEntities - shared helper"""
     te = TLRPC.TL_textWithEntities()
     te.text = text
     te.entities = ArrayList()
     return te
+
+
+def _translate_and_apply_in_message(text: str, lang: str, obj, activity):
+    translated = safe_execute(
+        lambda: _cached_translate(text, lang, log_prefix="[IN-MSG] "),
+        "[IN-MSG] translation failed"
+    )
+    if translated:
+        apply_in_message_translation(obj, activity, translated, lang)
 
 
 def apply_in_message_translation(msg, activity, txt, lang):
@@ -371,12 +384,12 @@ def apply_in_message_translation(msg, activity, txt, lang):
                 adapter = get_private_field(activity, "chatAdapter")
                 if adapter:
                     adapter.notifyDataSetChanged()
-            except:
-                pass
+            except Exception as e:
+                debug_log(f"[IN-MSG] Failed to apply translation to UI: {e}")
 
         run_on_ui_thread(ui)
-    except:
-        pass
+    except Exception as e:
+        debug_log(f"[IN-MSG] apply_in_message_translation failed: {e}")
 
 
 class BlockRevertHook(MethodHook):
@@ -386,8 +399,8 @@ class BlockRevertHook(MethodHook):
             if (m and (m.getDialogId(), m.getId()) in _in_message_translated 
                 and m.translated and m.messageOwner and m.messageOwner.translatedText):
                 p.setResult(False)
-        except:
-            pass
+        except Exception as e:
+            debug_log(f"[IN-MSG] BlockRevertHook failed: {e}")
 
 
 class InMessageAlertHook(MethodHook):
@@ -416,10 +429,10 @@ class InMessageAlertHook(MethodHook):
                 return
             
             lang = _in_message_classes['TA'].getToLanguage()
-            _translate_with_google_async(str(txt), lang, lambda r: apply_in_message_translation(obj, f, r, lang))
+            _executor.submit(_translate_and_apply_in_message, str(txt), lang, obj, f)
             self.pending = True
-        except:
-            pass
+        except Exception as e:
+            debug_log(f"[IN-MSG] showAlert hook failed: {e}")
 
     def after_hooked_method(self, p):
         if self.pending:
@@ -436,9 +449,6 @@ class ResultHook(MethodHook):
 
 
 class LocalPremiumHook:
-    # Note: AdvancedTranslatorPlugin's MRO never calls this mixin's __init__,
-    # so _premium_unhooks is initialized explicitly in on_plugin_load instead.
-    # premium_unhooking() also uses getattr() as a defensive fallback.
 
     def premium_hooking(self):
         clazz = jclass("org.telegram.messenger.UserConfig")
@@ -540,11 +550,6 @@ class AdvancedTranslatorPlugin(BasePlugin, LocalPremiumHook):
         log("Unloaded")
 
     def on_update_hook(self, update_name: str, account: int, update: Any) -> HookResult:
-        # Native chat-wide translation only reliably calls pushToTranslate when
-        # messages are (re)loaded into a chat - e.g. on opening it. A message that
-        # arrives live while you're already inside the chat doesn't always trigger
-        # it, so translation lags until you leave and come back. Here we translate
-        # eagerly the moment the new-message update itself arrives.
         try:
             if JAVA_CLASSES_FOUND and update_name in ("TL_updateNewMessage", "TL_updateNewChannelMessage"):
                 if self.get_setting("enable_entire_chat_translation", False):
@@ -814,6 +819,6 @@ __name__ = "TranslatorPlus"
 __description__ = "Ultra-fast multi-provider translation for Telegram with in-message support"
 __icon__ = "luvztroyicons/1"
 __id__ = "translatorplus"
-__version__ = "1.4.3"
+__version__ = "1.4.4"
 __author__ = "@xwvux"
 __min_version__ = "11.12.0"
