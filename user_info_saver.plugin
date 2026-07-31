@@ -25,10 +25,6 @@ __version__ = "1.0.1"
 __min_version__ = "12.0.1"
 
 
-# ---------------------------------------------------------------------------
-# Standalone replacements for the bits this plugin used to borrow from ZwyLib
-# ---------------------------------------------------------------------------
-
 class _CustomLogger(logging.Logger):
     def _log(self, level, msg, args, exc_info=None, extra=None, stack_info=False, stacklevel=1):
         level_name = logging.getLevelName(level)
@@ -65,8 +61,6 @@ def build_log(plugin_name: str, level=logging.NOTSET) -> logging.Logger:
 
 
 class JsonCacheFile:
-    """Minimal standalone stand-in for zwylib.JsonCacheFile."""
-
     def __init__(self, filename: str, default, compress: bool = False):
         self._default = default
         self.compress = compress
@@ -126,8 +120,6 @@ class JsonCacheFile:
 
 
 def hook_max_args_overload(plugin_instance, clazz, method_name: str, hook_instance):
-    """Standalone stand-in for zwylib.hook_max_args_method: hooks the overload
-    of `method_name` with the most parameters."""
     method = max(
         [m for m in clazz.getDeclaredMethods() if m.getName() == method_name],
         key=lambda m: m.getParameterCount(),
@@ -141,10 +133,6 @@ def hook_max_args_overload(plugin_instance, clazz, method_name: str, hook_instan
     method.setAccessible(True)
     plugin_instance.hook_method(method, hook_instance)
 
-
-# ---------------------------------------------------------------------------
-# Original plugin logic
-# ---------------------------------------------------------------------------
 
 def settings_has_necessary_field(settings: Optional[TLRPC.TL_peerSettings | dict]) -> bool:
     if isinstance(settings, dict):
