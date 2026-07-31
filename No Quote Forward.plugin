@@ -4,10 +4,12 @@ from java import jclass, dynamic_proxy
 from android_utils import run_on_ui_thread, OnClickListener, OnLongClickListener
 from ui.settings import Header, Switch, Divider
 
-from org.telegram.messenger import R as R_tg, NotificationCenter
+from org.telegram.messenger import R as R_tg, NotificationCenter, MessageObject
 from org.telegram.ui import ChatActivity, DialogsActivity
 from org.telegram.messenger import DialogObject
 from android.os import Bundle
+from java.util import ArrayList as _ArrayListType
+from java.lang import Integer as JavaInteger
 
 __id__ = "no_quote_forward"
 __name__ = "No Quote Forward"
@@ -16,21 +18,17 @@ __description__ = "Add NoQuote forward option to message context menu and forwar
 __version__ = "1.0.0"
 __author__ = "@luvztroy"
 __min_version__ = "12.2.10"
-__dependencies__ = ["quantahut"]
-
-
-try:
-    import quantahut
-except ImportError:
-    raise Exception("QuantaHut is required but not installed.")
 
 
 class EnableNoQuoteForwardPlugin(BasePlugin):
     def __init__(self):
         super().__init__()
-        self.no_quote_forward_menu_handle = None
         self.current_mode = "forward"
         self._unhook_layout = None
+        self._unhook_fill_menu = None
+        self._unhook_process_option = None
+        self._last_menu_message = None
+        self._menu_option_id = 9999
         self._class_cache = {}
     
     def _get_class(self, class_name):
@@ -541,29 +539,76 @@ class EnableNoQuoteForwardPlugin(BasePlugin):
         
         chat_activity.presentFragment(dialogs_fragment)
     
+    def _menu_item_condition(self, message):
+        return (message is not None and
+                not self._is_service_message(message) and
+                not self._is_failed_message(message) and
+                not self._is_scheduled_message(message))
+
     def _add_no_quote_forward_menu_item(self):
         try:
-            def condition_predicate(m):
-                return (m is not None and 
-                        not self._is_service_message(m) and 
-                        not self._is_failed_message(m) and 
-                        not self._is_scheduled_message(m))
-            
-            self.no_quote_forward_menu_handle = quantahut.utilities.register_message_menu_item(
-                text="NoQuote forward",
-                option_id=9999,
-                icon_res=R_tg.drawable.media_share,
-                condition_predicate=condition_predicate,
-                on_click=self._on_no_quote_forward_click,
-                insert_at_top=True
+            fill_method = ChatActivity.getClass().getDeclaredMethod(
+                "fillMessageMenu",
+                MessageObject,
+                _ArrayListType,
+                _ArrayListType,
+                _ArrayListType
             )
+            process_method = ChatActivity.getClass().getDeclaredMethod(
+                "processSelectedOption",
+                JavaInteger.TYPE
+            )
+
+            plugin_ref = self
+
+            class FillMenuHook(MethodHook):
+                def after_hooked_method(hook_self, param):
+                    try:
+                        message = param.args[0]
+                        if message is None:
+                            return
+                        plugin_ref._last_menu_message = message
+                        if not plugin_ref._menu_item_condition(message):
+                            return
+                        icons = param.args[1]
+                        items = param.args[2]
+                        options = param.args[3]
+                        icons.add(0, JavaInteger(R_tg.drawable.media_share))
+                        options.add(0, JavaInteger(plugin_ref._menu_option_id))
+                        items.add(0, "NoQuote forward")
+                    except Exception:
+                        pass
+
+            class ProcessOptionHook(MethodHook):
+                def before_hooked_method(hook_self, param):
+                    try:
+                        opt_val = int(param.args[0])
+                        if opt_val != plugin_ref._menu_option_id:
+                            return
+                        chat_activity = param.thisObject
+                        message = getattr(chat_activity, 'selectedObject', None)
+                        if message is None:
+                            message = plugin_ref._last_menu_message
+                        try:
+                            chat_activity.closeMenu()
+                        except Exception:
+                            pass
+                        plugin_ref._on_no_quote_forward_click(chat_activity, message)
+                        param.setResult(None)
+                    except Exception:
+                        pass
+
+            self._unhook_fill_menu = self.hook_method(fill_method, FillMenuHook())
+            self._unhook_process_option = self.hook_method(process_method, ProcessOptionHook())
         except Exception:
             pass
 
     def _remove_no_quote_forward_menu_item(self):
-        try:
-            if self.no_quote_forward_menu_handle:
-                quantahut.utilities.unregister_message_menu_item(self.no_quote_forward_menu_handle)
-                self.no_quote_forward_menu_handle = None
-        except Exception:
-            pass
+        for attr_name in ("_unhook_fill_menu", "_unhook_process_option"):
+            hook = getattr(self, attr_name, None)
+            if hook:
+                try:
+                    self.unhook_method(hook)
+                except Exception:
+                    pass
+                setattr(self, attr_name, None)
