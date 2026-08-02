@@ -392,7 +392,7 @@ async def process_topic_buffer(client, topic_id):
         for user_name, user_message in buffered:
             chat_history = get_chat_history(topic_id, user_message, user_name)
 
-        await asyncio.sleep(random.choice([4, 6]))
+        await asyncio.sleep(random.choice([6, 8, 10]))
 
         prompt = build_prompt(chat_history)
         bot_response = await generate_gemini_response(prompt, chat_history, topic_id, bot_role=bot_role)
