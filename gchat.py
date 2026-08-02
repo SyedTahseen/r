@@ -137,10 +137,6 @@ async def send_reply(reply_func, args, kwargs, client):
     await reply_queue.put((reply_func, args, kwargs))
 
 async def instant_reply(reply_func, args, kwargs, client):
-    """Like send_reply, but executes immediately instead of going through
-    reply_queue/reply_worker. Use this for command handlers (setgchat, gchat,
-    gswitch, role, ...) so they respond right away instead of waiting behind
-    queued Gemini replies, media sends, or FloodWait sleeps."""
     if isinstance(args, tuple):
         args = list(args)
     kwargs = dict(kwargs)
@@ -211,7 +207,7 @@ async def handle_gpic_message(client, chat_id, bot_response):
 
 _roles_cache = None
 _roles_cache_time = 0
-ROLES_CACHE_TTL = 300  # seconds
+ROLES_CACHE_TTL = 300
 
 async def fetch_roles():
     global _roles_cache, _roles_cache_time
@@ -414,7 +410,6 @@ async def gchat(client: Client, message: Message):
             if not buffered_messages:
                 return
             combined_message = " ".join(buffered_messages)
-            # Re-read bot_role at fire time so role changes mid-buffer take effect
             _roles = await fetch_roles()
             _default_role = _roles.get("default")
             if not _default_role:
@@ -471,7 +466,7 @@ async def handle_files(client: Client, message: Message):
             image_path = await client.download_media(message.photo)
             client.image_buffer[user_id].append(image_path)
             if client.image_timers.get(user_id) is None:
-                client.image_timers[user_id] = True  # sentinel to block duplicate tasks
+                client.image_timers[user_id] = True
                 async def process_images():
                     try:
                         await asyncio.sleep(10)
