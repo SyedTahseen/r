@@ -111,6 +111,18 @@ def set_gemini_model(model_name: str):
     _gemini_model_cache = model_name
 
 
+def get_voice_generation_enabled():
+    enabled = db.get(settings_collection, "voice_generation_enabled")
+    if enabled is None:
+        enabled = True
+        db.set(settings_collection, "voice_generation_enabled", True)
+    return enabled
+
+
+def set_voice_generation_enabled(enabled: bool):
+    db.set(settings_collection, "voice_generation_enabled", enabled)
+
+
 def get_history_limits():
     head = db.get(settings_collection, "history_head")
     tail = db.get(settings_collection, "history_tail")
@@ -249,24 +261,31 @@ async def send_typing_action(client, chat_id, user_message):
 
 
 async def handle_voice_message(client, chat_id, bot_response, thread_id=None):
-    if ".el" in bot_response:
-        start_index = bot_response.find(".el")
-        if start_index != -1:
-            bot_response = bot_response[start_index + len(".el"):].strip()
-        try:
-            audio_path = await generate_elevenlabs_audio(text=bot_response)
-            if audio_path:
-                kwargs = {"voice": audio_path, "cleanup_file": audio_path}
-                if thread_id:
-                    kwargs["message_thread_id"] = thread_id
-                await send_reply(client.send_voice, [chat_id], kwargs, client)
-                return True
-        except Exception:
-            await send_reply(client.send_message, ["me", "⚠️ ElevenLabs audio generation error"], {}, client)
-            kwargs = {"message_thread_id": thread_id} if thread_id else {}
-            await send_reply(client.send_message, [chat_id, bot_response], kwargs, client)
-            return True
-    return False
+    if not isinstance(bot_response, str) or ".el" not in bot_response:
+        return False
+
+    start_index = bot_response.find(".el")
+    if start_index != -1:
+        bot_response = bot_response[start_index + len(".el"):].strip()
+
+    text_kwargs = {"message_thread_id": thread_id} if thread_id else {}
+
+    if not get_voice_generation_enabled():
+        await send_reply(client.send_message, [chat_id, bot_response], text_kwargs, client)
+        return True
+
+    try:
+        audio_path = await generate_elevenlabs_audio(text=bot_response)
+        if audio_path and os.path.exists(audio_path):
+            kwargs = {"voice": audio_path, "cleanup_file": audio_path}
+            if thread_id:
+                kwargs["message_thread_id"] = thread_id
+            await send_reply(client.send_voice, [chat_id], kwargs, client)
+        else:
+            await send_reply(client.send_message, [chat_id, bot_response], text_kwargs, client)
+    except Exception:
+        await send_reply(client.send_message, [chat_id, bot_response], text_kwargs, client)
+    return True
 
 
 @Client.on_message(filters.sticker & filters.group & ~filters.me)
@@ -283,7 +302,11 @@ async def handle_sticker(client: Client, message: Message):
         await asyncio.sleep(random.uniform(5, 10))
         await send_reply(message.reply_text, [random_smiley], {}, client)
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"⚠️ handle_sticker error\n{str(e)}"], {}, client)
+        await send_reply(
+            client.send_message,
+            ["me", f"⚠️ handle_sticker error\n@{message.chat.username or message.chat.id}:{message.message_thread_id}\n{str(e)}"],
+            {}, client,
+        )
 
 
 @Client.on_message(filters.animation & filters.group & ~filters.me)
@@ -299,7 +322,11 @@ async def handle_gif(client: Client, message: Message):
         await asyncio.sleep(random.uniform(5, 10))
         await send_reply(message.reply_text, [random_smiley], {}, client)
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"⚠️ handle_gif error\n{str(e)}"], {}, client)
+        await send_reply(
+            client.send_message,
+            ["me", f"⚠️ handle_gif error\n@{message.chat.username or message.chat.id}:{message.message_thread_id}\n{str(e)}"],
+            {}, client,
+        )
 
 
 @Client.on_message(filters.text & filters.group & ~filters.me)
@@ -333,53 +360,35 @@ async def wchat(client: Client, message: Message):
         await asyncio.sleep(random.choice([4, 6]))
         await send_typing_action(client, message.chat.id, user_message)
 
-        gemini_keys = db.get(settings_collection, "gemini_keys")
-        current_key_index = db.get(settings_collection, "current_key_index") or 0
-        retries = len(gemini_keys) * 2
+        prompt = build_prompt(chat_history)
+        bot_response = await generate_gemini_response(prompt, chat_history, topic_id, bot_role=bot_role)
 
-        while retries > 0:
-            try:
-                current_key = gemini_keys[current_key_index]
-                genai.configure(api_key=current_key)
-                model = genai.GenerativeModel(
-                    get_gemini_model(),
-                    generation_config=generation_config,
-                    system_instruction=build_system_instruction(bot_role),
-                )
-                model.safety_settings = safety_settings
+        if not bot_response:
+            await send_reply(
+                client.send_message,
+                ["me", f"⚠️ Gemini empty response\n@{message.chat.username or message.chat.id}:{message.message_thread_id}"],
+                {}, client,
+            )
+            return
 
-                prompt = build_prompt(chat_history)
-                chat_session = model.start_chat()
-                response = await asyncio.to_thread(chat_session.send_message, prompt)
-                bot_response = response.text.strip()
+        if await handle_voice_message(client, message.chat.id, bot_response, thread_id=message.message_thread_id):
+            return
 
-                full_history = db.get(history_collection, f"chat_history.{topic_id}") or []
-                full_history.append(bot_response)
-                db.set(history_collection, f"chat_history.{topic_id}", full_history)
-
-                if ".el" in bot_response:
-                    return await handle_voice_message(
-                        client, message.chat.id, bot_response, thread_id=message.message_thread_id
-                    )
-
-                await send_reply(
-                    client.send_message,
-                    [message.chat.id, bot_response],
-                    {"message_thread_id": message.message_thread_id},
-                    client,
-                )
-                return
-            except Exception as e:
-                if "429" in str(e) or "invalid" in str(e).lower():
-                    retries -= 1
-                    if retries % 2 == 0:
-                        current_key_index = (current_key_index + 1) % len(gemini_keys)
-                        db.set(settings_collection, "current_key_index", current_key_index)
-                    await asyncio.sleep(4)
-                else:
-                    raise e
+        await send_reply(
+            client.send_message,
+            [message.chat.id, bot_response],
+            {"message_thread_id": message.message_thread_id},
+            client,
+        )
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"⚠️ wchat module error\n{str(e)}"], {}, client)
+        await send_reply(
+            client.send_message,
+            [
+                "me",
+                f"⚠️ wchat module error\n@{message.chat.username or message.chat.id}:{message.message_thread_id}\n{str(e)}",
+            ],
+            {}, client,
+        )
 
 
 @Client.on_message(filters.group & ~filters.me)
@@ -445,9 +454,20 @@ async def handle_files(client: Client, message: Message):
                         response = await generate_gemini_response(
                             input_data, chat_history, topic_id, bot_role=bot_role
                         )
-                        await send_reply(message.reply_text, [response], {}, client)
+                        if not response:
+                            await send_reply(
+                                client.send_message,
+                                ["me", f"⚠️ Gemini empty response\n@{message.chat.username or message.chat.id}:{topic_id}"],
+                                {}, client,
+                            )
+                        elif not await handle_voice_message(client, message.chat.id, response, thread_id=message.message_thread_id):
+                            await send_reply(message.reply_text, [response], {}, client)
                     except Exception as e:
-                        await send_reply(client.send_message, ["me", f"⚠️ process_images error\n{str(e)}"], {}, client)
+                        await send_reply(
+                            client.send_message,
+                            ["me", f"⚠️ process_images error\n@{message.chat.username or message.chat.id}:{topic_id}\n{str(e)}"],
+                            {}, client,
+                        )
                     finally:
                         for path in image_paths:
                             if os.path.exists(path):
@@ -484,9 +504,20 @@ async def handle_files(client: Client, message: Message):
             response = await generate_gemini_response(
                 input_data, chat_history, topic_id, bot_role=bot_role
             )
-            await send_reply(message.reply_text, [response], {}, client)
+            if not response:
+                await send_reply(
+                    client.send_message,
+                    ["me", f"⚠️ Gemini empty response\n@{message.chat.username or message.chat.id}:{topic_id}"],
+                    {}, client,
+                )
+            elif not await handle_voice_message(client, message.chat.id, response, thread_id=message.message_thread_id):
+                await send_reply(message.reply_text, [response], {}, client)
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"⚠️ handle_files error\n{str(e)}"], {}, client)
+        await send_reply(
+            client.send_message,
+            ["me", f"⚠️ handle_files error\n@{message.chat.username or message.chat.id}:{message.message_thread_id}\n{str(e)}"],
+            {}, client,
+        )
     finally:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
@@ -545,7 +576,11 @@ async def wchat_command(client: Client, message: Message):
 
         await send_reply(message.delete, [], {}, client)
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"⚠️ wchat command error\n{str(e)}"], {}, client)
+        await send_reply(
+            client.send_message,
+            ["me", f"⚠️ wchat command error\n@{message.chat.username or message.chat.id}\n{str(e)}"],
+            {}, client,
+        )
 
 
 @Client.on_message(filters.command("wrole", prefix) & filters.me)
@@ -608,7 +643,11 @@ async def set_custom_role(client: Client, message: Message):
 
         await send_reply(message.delete, [], {}, client)
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"⚠️ wrole command error\n{str(e)}"], {}, client)
+        await send_reply(
+            client.send_message,
+            ["me", f"⚠️ wrole command error\n@{message.chat.username or message.chat.id}\n{str(e)}"],
+            {}, client,
+        )
 
 
 @Client.on_message(filters.command("wswitch", prefix) & filters.me)
@@ -646,7 +685,11 @@ async def switch_role(client: Client, message: Message):
 
         await send_reply(message.delete, [], {}, client)
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"⚠️ wswitch command error\n{str(e)}"], {}, client)
+        await send_reply(
+            client.send_message,
+            ["me", f"⚠️ wswitch command error\n@{message.chat.username or message.chat.id}\n{str(e)}"],
+            {}, client,
+        )
 
 
 @Client.on_message(filters.command(["setwchat", "setwc"], prefix) & filters.me)
@@ -665,6 +708,13 @@ async def set_gemini_key(client: Client, message: Message):
                 await send_reply(message.edit_text, [f"Gemini model set to: {key}"], {}, client)
             else:
                 await send_reply(message.edit_text, [f"Current Gemini model: {get_gemini_model()}"], {}, client)
+            return
+
+        if subcommand == "voice":
+            enabled = not get_voice_generation_enabled()
+            set_voice_generation_enabled(enabled)
+            stat = "ON" if enabled else "OFF"
+            await send_reply(message.edit_text, [f"Voice: {stat}"], {}, client)
             return
 
         if subcommand == "add" and key:
@@ -748,12 +798,13 @@ async def set_gemini_key(client: Client, message: Message):
 
         keys_list = "\n".join([f"{i + 1}. {k}" for i, k in enumerate(gemini_keys)])
         current_key = gemini_keys[current_key_index] if gemini_keys else "None"
+        voice_status = "ON" if get_voice_generation_enabled() else "OFF"
         head, tail = get_history_limits()
         current_default_role = db.get(settings_collection, "default_role") or "default"
         menu_text = (
             f"Keys:\n{keys_list}\n\n"
             f"Current: {current_key}\nModel: {get_gemini_model()}\n"
-            f"Role: {current_default_role}\n"
+            f"Voice: {voice_status}\nRole: {current_default_role}\n"
             f"History head: {head}, tail: {tail}"
         )
         CHUNK_SIZE = 3800
@@ -769,7 +820,11 @@ async def set_gemini_key(client: Client, message: Message):
         else:
             await send_reply(message.edit_text, [menu_text], {}, client)
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"⚠️ setwchat error\n{str(e)}"], {}, client)
+        await send_reply(
+            client.send_message,
+            ["me", f"⚠️ setwchat error\n@{message.chat.username or message.chat.id}\n{str(e)}"],
+            {}, client,
+        )
 
 
 @Client.on_message(filters.command("wtest", prefix) & filters.me)
@@ -816,7 +871,11 @@ async def test_wchat_keys(client: Client, message: Message):
         )
         await send_reply(message.delete, [], {}, client)
     except Exception as e:
-        await send_reply(client.send_message, ["me", f"⚠️ wtest command error\n{str(e)}"], {}, client)
+        await send_reply(
+            client.send_message,
+            ["me", f"⚠️ wtest command error\n@{message.chat.username or message.chat.id}\n{str(e)}"],
+            {}, client,
+        )
 
 
 modules_help["wchat"] = {
@@ -826,6 +885,7 @@ modules_help["wchat"] = {
     "setwchat add/set/del <key|index>": "Manage Gemini API keys.",
     "setwchat": "Show Gemini config & status.",
     "setwchat model <n>": "Set/show Gemini model.",
+    "setwchat voice": "Toggle voice reply.",
     "setwchat role <n>": "Set/show global role.",
     "setwchat history <n>": "Set/show chat history head/tail.",
     "wtest": "Test Gemini keys.",
