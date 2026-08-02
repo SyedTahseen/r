@@ -96,6 +96,34 @@ async def send_reply(reply_func, args, kwargs, client):
     await reply_queue.put((reply_func, args, kwargs))
 
 
+# --- instant reply path for our own command messages ---
+# Commands (wchat, wrole, wswitch, setwchat, wtest) are low-volume, self
+# triggered actions (edit/delete our own message) and shouldn't sit behind
+# the throttled Gemini reply_queue, which exists to pace outgoing group
+# replies and survive FloodWait. Commands get their own direct path so
+# they execute immediately, while still handling FloodWait if it happens.
+async def instant_reply(reply_func, args, kwargs, client):
+    if isinstance(args, tuple):
+        args = list(args)
+    cleanup_file = kwargs.pop("cleanup_file", None)
+    try:
+        try:
+            await reply_func(*args, **kwargs)
+        except FloodWait as e:
+            try:
+                await client.send_message("me", f"⚠️ FloodWait\nSleeping {e.value}s")
+            except Exception:
+                pass
+            await asyncio.sleep(e.value + 1)
+            await reply_func(*args, **kwargs)
+    finally:
+        if cleanup_file and os.path.exists(cleanup_file):
+            try:
+                os.remove(cleanup_file)
+            except Exception:
+                pass
+
+
 def get_gemini_model():
     global _gemini_model_cache
     if _gemini_model_cache is not None:
@@ -530,7 +558,7 @@ async def wchat_command(client: Client, message: Message):
         group_id = str(message.chat.id)
 
         if len(parts) < 2:
-            await send_reply(message.edit_text, [f"Usage: {prefix}wchat [on|off|del|all] [topic_id]"], {}, client)
+            await instant_reply(message.edit_text, [f"Usage: {prefix}wchat [on|off|del|all] [topic_id]"], {}, client)
             return
 
         if len(parts) == 2:
@@ -547,7 +575,7 @@ async def wchat_command(client: Client, message: Message):
             if topic_id not in enabled_topics:
                 enabled_topics.append(topic_id)
                 db.set(settings_collection, "enabled_topics", enabled_topics)
-            await send_reply(message.edit_text, [f"<spoiler>ON: {topic_id}</spoiler>"], {}, client)
+            await instant_reply(message.edit_text, [f"<spoiler>ON: {topic_id}</spoiler>"], {}, client)
 
         elif command == "off":
             if topic_id not in disabled_topics:
@@ -556,27 +584,27 @@ async def wchat_command(client: Client, message: Message):
             if topic_id in enabled_topics:
                 enabled_topics.remove(topic_id)
                 db.set(settings_collection, "enabled_topics", enabled_topics)
-            await send_reply(message.edit_text, [f"<spoiler>OFF: {topic_id}</spoiler>"], {}, client)
+            await instant_reply(message.edit_text, [f"<spoiler>OFF: {topic_id}</spoiler>"], {}, client)
 
         elif command == "del":
             db.set(history_collection, f"chat_history.{topic_id}", None)
-            await send_reply(message.edit_text, [f"<spoiler>Deleted: {topic_id}</spoiler>"], {}, client)
+            await instant_reply(message.edit_text, [f"<spoiler>Deleted: {topic_id}</spoiler>"], {}, client)
 
         elif command == "all":
             wchat_for_all_groups[group_id] = not wchat_for_all_groups.get(group_id, False)
             db.set(settings_collection, "wchat_for_all_groups", wchat_for_all_groups)
-            await send_reply(
+            await instant_reply(
                 message.edit_text,
                 [f"All: {'enabled' if wchat_for_all_groups[group_id] else 'disabled'}"],
                 {}, client,
             )
 
         else:
-            await send_reply(message.edit_text, [f"Usage: {prefix}wchat [on|off|del|all] [topic_id]"], {}, client)
+            await instant_reply(message.edit_text, [f"Usage: {prefix}wchat [on|off|del|all] [topic_id]"], {}, client)
 
-        await send_reply(message.delete, [], {}, client)
+        await instant_reply(message.delete, [], {}, client)
     except Exception as e:
-        await send_reply(
+        await instant_reply(
             client.send_message,
             ["me", f"⚠️ wchat command error\n@{message.chat.username or message.chat.id}\n{str(e)}"],
             {}, client,
@@ -588,7 +616,7 @@ async def set_custom_role(client: Client, message: Message):
     try:
         parts = message.text.strip().split()
         if len(parts) < 2:
-            await send_reply(message.edit_text, [f"Usage: {prefix}wrole [group|topic] <custom role>"], {}, client)
+            await instant_reply(message.edit_text, [f"Usage: {prefix}wrole [group|topic] <custom role>"], {}, client)
             return
 
         scope = parts[1].lower()
@@ -597,19 +625,19 @@ async def set_custom_role(client: Client, message: Message):
         default_role = roles.get("default")
 
         if not default_role:
-            await send_reply(client.send_message, ["me", "⚠️ 'default' role missing."], {}, client)
+            await instant_reply(client.send_message, ["me", "⚠️ 'default' role missing."], {}, client)
             return
 
         if scope == "group":
             if len(parts) == 2:
                 group_roles.pop(group_id, None)
                 db.set(settings_collection, "group_roles", group_roles)
-                await send_reply(message.edit_text, [f"<spoiler>Role reset: {group_id}</spoiler>"], {}, client)
+                await instant_reply(message.edit_text, [f"<spoiler>Role reset: {group_id}</spoiler>"], {}, client)
             else:
                 custom_role = " ".join(parts[2:]).strip()
                 group_roles[group_id] = custom_role
                 db.set(settings_collection, "group_roles", group_roles)
-                await send_reply(
+                await instant_reply(
                     message.edit_text, [f"<spoiler>Role set: {group_id}</spoiler>\n{custom_role}"], {}, client
                 )
         elif scope == "topic":
@@ -617,13 +645,13 @@ async def set_custom_role(client: Client, message: Message):
                 topic_id = f"{group_id}:{message.message_thread_id}"
                 db.set(settings_collection, f"custom_roles.{topic_id}", default_role)
                 db.set(history_collection, f"chat_history.{topic_id}", None)
-                await send_reply(message.edit_text, [f"<spoiler>Role reset: {topic_id}</spoiler>"], {}, client)
+                await instant_reply(message.edit_text, [f"<spoiler>Role reset: {topic_id}</spoiler>"], {}, client)
             elif len(parts) == 3:
                 topic_id = f"{group_id}:{parts[2]}"
                 group_role = group_roles.get(group_id, default_role)
                 db.set(settings_collection, f"custom_roles.{topic_id}", group_role)
                 db.set(history_collection, f"chat_history.{topic_id}", None)
-                await send_reply(
+                await instant_reply(
                     message.edit_text, [f"<spoiler>Role reset to group: {topic_id}</spoiler>"], {}, client
                 )
             else:
@@ -635,15 +663,15 @@ async def set_custom_role(client: Client, message: Message):
                     custom_role = " ".join(parts[2:]).strip()
                 db.set(settings_collection, f"custom_roles.{topic_id}", custom_role)
                 db.set(history_collection, f"chat_history.{topic_id}", None)
-                await send_reply(
+                await instant_reply(
                     message.edit_text, [f"<spoiler>Role set: {topic_id}</spoiler>\n{custom_role}"], {}, client
                 )
         else:
-            await send_reply(message.edit_text, ["Invalid scope. Use 'group' or 'topic'."], {}, client)
+            await instant_reply(message.edit_text, ["Invalid scope. Use 'group' or 'topic'."], {}, client)
 
-        await send_reply(message.delete, [], {}, client)
+        await instant_reply(message.delete, [], {}, client)
     except Exception as e:
-        await send_reply(
+        await instant_reply(
             client.send_message,
             ["me", f"⚠️ wrole command error\n@{message.chat.username or message.chat.id}\n{str(e)}"],
             {}, client,
@@ -655,8 +683,8 @@ async def switch_role(client: Client, message: Message):
     try:
         roles = await fetch_roles()
         if not roles:
-            await send_reply(client.send_message, ["me", "⚠️ Role fetch error."], {}, client)
-            await send_reply(message.edit_text, ["Failed to fetch roles."], {}, client)
+            await instant_reply(client.send_message, ["me", "⚠️ Role fetch error."], {}, client)
+            await instant_reply(message.edit_text, ["Failed to fetch roles."], {}, client)
             return
 
         parts = message.text.strip().split()
@@ -664,7 +692,7 @@ async def switch_role(client: Client, message: Message):
 
         if len(parts) == 1:
             available_roles = "\n".join([f"- {role}" for role in roles.keys()])
-            await send_reply(message.edit_text, [f"Roles:\n{available_roles}"], {}, client)
+            await instant_reply(message.edit_text, [f"Roles:\n{available_roles}"], {}, client)
             return
 
         if len(parts) == 2:
@@ -677,15 +705,15 @@ async def switch_role(client: Client, message: Message):
         if role_name in roles:
             db.set(settings_collection, f"custom_roles.{topic_id}", roles[role_name])
             db.set(history_collection, f"chat_history.{topic_id}", None)
-            await send_reply(
+            await instant_reply(
                 message.edit_text, [f"<spoiler>Switched: {topic_id}</spoiler>\n{role_name}"], {}, client
             )
         else:
-            await send_reply(message.edit_text, [f"Not found: {role_name}"], {}, client)
+            await instant_reply(message.edit_text, [f"Not found: {role_name}"], {}, client)
 
-        await send_reply(message.delete, [], {}, client)
+        await instant_reply(message.delete, [], {}, client)
     except Exception as e:
-        await send_reply(
+        await instant_reply(
             client.send_message,
             ["me", f"⚠️ wswitch command error\n@{message.chat.username or message.chat.id}\n{str(e)}"],
             {}, client,
@@ -705,25 +733,25 @@ async def set_gemini_key(client: Client, message: Message):
         if subcommand == "model":
             if key:
                 set_gemini_model(key)
-                await send_reply(message.edit_text, [f"Gemini model set to: {key}"], {}, client)
+                await instant_reply(message.edit_text, [f"Gemini model set to: {key}"], {}, client)
             else:
-                await send_reply(message.edit_text, [f"Current Gemini model: {get_gemini_model()}"], {}, client)
+                await instant_reply(message.edit_text, [f"Current Gemini model: {get_gemini_model()}"], {}, client)
             return
 
         if subcommand == "voice":
             enabled = not get_voice_generation_enabled()
             set_voice_generation_enabled(enabled)
             stat = "ON" if enabled else "OFF"
-            await send_reply(message.edit_text, [f"Voice: {stat}"], {}, client)
+            await instant_reply(message.edit_text, [f"Voice: {stat}"], {}, client)
             return
 
         if subcommand == "add" and key:
             if key in gemini_keys:
-                await send_reply(message.edit_text, ["Key already added!"], {}, client)
+                await instant_reply(message.edit_text, ["Key already added!"], {}, client)
                 return
             gemini_keys.append(key)
             db.set(settings_collection, "gemini_keys", gemini_keys)
-            await send_reply(message.edit_text, ["Gemini key added!"], {}, client)
+            await instant_reply(message.edit_text, ["Gemini key added!"], {}, client)
             return
 
         if subcommand == "set" and key:
@@ -734,9 +762,9 @@ async def set_gemini_key(client: Client, message: Message):
                 genai.configure(api_key=gemini_keys[current_key_index])
                 model = genai.GenerativeModel(get_gemini_model(), generation_config=generation_config)
                 model.safety_settings = safety_settings
-                await send_reply(message.edit_text, [f"Current key set to: {key}"], {}, client)
+                await instant_reply(message.edit_text, [f"Current key set to: {key}"], {}, client)
             else:
-                await send_reply(message.edit_text, [f"Invalid key index: {key}"], {}, client)
+                await instant_reply(message.edit_text, [f"Invalid key index: {key}"], {}, client)
             return
 
         if subcommand == "del" and key:
@@ -747,9 +775,9 @@ async def set_gemini_key(client: Client, message: Message):
                 if current_key_index >= len(gemini_keys):
                     current_key_index = max(0, len(gemini_keys) - 1)
                     db.set(settings_collection, "current_key_index", current_key_index)
-                await send_reply(message.edit_text, [f"Key {key} deleted!"], {}, client)
+                await instant_reply(message.edit_text, [f"Key {key} deleted!"], {}, client)
             else:
-                await send_reply(message.edit_text, [f"Invalid key index: {key}"], {}, client)
+                await instant_reply(message.edit_text, [f"Invalid key index: {key}"], {}, client)
             return
 
         if subcommand == "role":
@@ -758,13 +786,13 @@ async def set_gemini_key(client: Client, message: Message):
                 role_name = key.lower()
                 if role_name in roles:
                     db.set(settings_collection, "default_role", role_name)
-                    await send_reply(message.edit_text, [f"Default: {role_name}"], {}, client)
+                    await instant_reply(message.edit_text, [f"Default: {role_name}"], {}, client)
                 else:
-                    await send_reply(message.edit_text, [f"Not found: {role_name}"], {}, client)
+                    await instant_reply(message.edit_text, [f"Not found: {role_name}"], {}, client)
             else:
                 roles_list = "\n".join([f"- {r}" for r in roles.keys()]) if roles else "No roles found."
                 current_default = db.get(settings_collection, "default_role") or "default"
-                await send_reply(
+                await instant_reply(
                     message.edit_text,
                     [f"Default role: {current_default}\n\nAvailable roles:\n{roles_list}"],
                     {}, client,
@@ -776,17 +804,17 @@ async def set_gemini_key(client: Client, message: Message):
                 n = int(key)
                 db.set(settings_collection, "history_head", n)
                 db.set(settings_collection, "history_tail", n)
-                await send_reply(message.edit_text, [f"History head/tail set to: {n}"], {}, client)
+                await instant_reply(message.edit_text, [f"History head/tail set to: {n}"], {}, client)
                 return
             elif len(command) > 3 and command[2].isdigit() and command[3].isdigit():
                 head, tail = int(command[2]), int(command[3])
                 db.set(settings_collection, "history_head", head)
                 db.set(settings_collection, "history_tail", tail)
-                await send_reply(message.edit_text, [f"History head: {head}, tail: {tail}"], {}, client)
+                await instant_reply(message.edit_text, [f"History head: {head}, tail: {tail}"], {}, client)
                 return
             else:
                 head, tail = get_history_limits()
-                await send_reply(
+                await instant_reply(
                     message.edit_text,
                     [
                         f"Current history head: {head}, tail: {tail}\n\n"
@@ -811,16 +839,16 @@ async def set_gemini_key(client: Client, message: Message):
         if len(menu_text) > CHUNK_SIZE:
             fp = f"wchat_menu_{int(time.time())}.txt"
             await asyncio.to_thread(_sync_write_file, fp, menu_text)
-            await send_reply(
+            await instant_reply(
                 client.send_document,
                 [message.chat.id, fp],
                 {"caption": "wchat menu", "cleanup_file": fp},
                 client,
             )
         else:
-            await send_reply(message.edit_text, [menu_text], {}, client)
+            await instant_reply(message.edit_text, [menu_text], {}, client)
     except Exception as e:
-        await send_reply(
+        await instant_reply(
             client.send_message,
             ["me", f"⚠️ setwchat error\n@{message.chat.username or message.chat.id}\n{str(e)}"],
             {}, client,
@@ -830,10 +858,10 @@ async def set_gemini_key(client: Client, message: Message):
 @Client.on_message(filters.command("wtest", prefix) & filters.me)
 async def test_wchat_keys(client: Client, message: Message):
     try:
-        await send_reply(message.edit_text, ["Testing Gemini keys..."], {}, client)
+        await instant_reply(message.edit_text, ["Testing Gemini keys..."], {}, client)
         gemini_keys = db.get(settings_collection, "gemini_keys") or []
         if not gemini_keys:
-            await send_reply(message.edit_text, ["No Gemini keys configured."], {}, client)
+            await instant_reply(message.edit_text, ["No Gemini keys configured."], {}, client)
             return
 
         test_prompt = "ping"
@@ -859,7 +887,7 @@ async def test_wchat_keys(client: Client, message: Message):
         result_text = "\n".join(result_lines)
         file_path = "wchat_test_results.txt"
         await asyncio.to_thread(_sync_write_file, file_path, result_text)
-        await send_reply(
+        await instant_reply(
             client.send_document,
             [message.chat.id],
             {
@@ -869,9 +897,9 @@ async def test_wchat_keys(client: Client, message: Message):
             },
             client,
         )
-        await send_reply(message.delete, [], {}, client)
+        await instant_reply(message.delete, [], {}, client)
     except Exception as e:
-        await send_reply(
+        await instant_reply(
             client.send_message,
             ["me", f"⚠️ wtest command error\n@{message.chat.username or message.chat.id}\n{str(e)}"],
             {}, client,
