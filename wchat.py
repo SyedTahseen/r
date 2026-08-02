@@ -3,7 +3,7 @@ import os
 import random
 import time
 from collections import defaultdict
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 from utils.scripts import import_library
@@ -270,18 +270,6 @@ async def upload_file_to_gemini(file_path, file_type):
     return uploaded_file
 
 
-async def send_typing_action(client, chat_id, user_message):
-    try:
-        await client.send_chat_action(chat_id=chat_id, action=enums.ChatAction.TYPING)
-        await asyncio.sleep(min(len(user_message) / 10, 5))
-    except Exception as e:
-        try:
-            await client.send_message("me", f"⚠️ send_typing_action error\n{e}")
-        except Exception:
-            pass
-        return
-
-
 async def handle_voice_message(client, chat_id, bot_response, thread_id=None):
     if not isinstance(bot_response, str) or ".el" not in bot_response:
         return False
@@ -447,6 +435,10 @@ async def wchat(client: Client, message: Message):
         )
 
 
+image_buffer = defaultdict(list)
+image_timers = {}
+
+
 @Client.on_message(filters.group & ~filters.me)
 async def handle_files(client: Client, message: Message):
     file_path = None
@@ -462,6 +454,12 @@ async def handle_files(client: Client, message: Message):
         ):
             return
 
+        if not any([
+            message.photo, message.video, message.video_note,
+            message.audio, message.voice, message.document,
+        ]):
+            return
+
         roles = await fetch_roles()
         default_role = roles.get("default")
 
@@ -472,65 +470,76 @@ async def handle_files(client: Client, message: Message):
         bot_role = db.get(settings_collection, f"custom_roles.{topic_id}") or group_roles.get(group_id) or default_role
 
         caption = message.caption.strip() if message.caption else ""
-        chat_history = get_chat_history(topic_id, caption, user_name)
-        chat_context = "\n".join(chat_history)
-
-        file_type = None
 
         if message.photo:
-            if not hasattr(client, "image_buffer"):
-                client.image_buffer = {}
-                client.image_timers = {}
-
-            if topic_id not in client.image_buffer:
-                client.image_buffer[topic_id] = []
-                client.image_timers[topic_id] = None
+            chat_history = get_chat_history(topic_id, caption or "[image]", user_name)
+            chat_context = "\n".join(chat_history)
 
             image_path = await client.download_media(message.photo)
-            client.image_buffer[topic_id].append(image_path)
+            image_buffer[topic_id].append(image_path)
 
-            if client.image_timers[topic_id] is None:
+            if image_timers.get(topic_id) is None:
+                image_timers[topic_id] = True
 
                 async def process_images():
-                    await asyncio.sleep(5)
-                    image_paths = client.image_buffer.pop(topic_id, [])
-                    client.image_timers[topic_id] = None
-
-                    if not image_paths:
-                        return
-
                     try:
-                        sample_images = [Image.open(img_path) for img_path in image_paths]
-                        prompt = (
-                            f"{chat_context}\n\nUser has sent multiple images."
-                            f"{' Caption: ' + caption if caption else ''} Generate a response based on the content of the images, and our chat context. "
-                            "Always follow the bot role, and talk like a human."
-                        )
-                        input_data = [prompt] + sample_images
-                        response = await generate_gemini_response(
-                            input_data, chat_history, topic_id, bot_role=bot_role
-                        )
-                        if not response:
-                            await send_reply(
-                                client.send_message,
-                                ["me", f"⚠️ Gemini empty response\n@{message.chat.username or message.chat.id}:{topic_id}"],
-                                {}, client,
+                        await asyncio.sleep(10)
+                        image_paths = image_buffer.pop(topic_id, [])
+                        image_timers[topic_id] = None
+
+                        if not image_paths:
+                            return
+
+                        sample_images = []
+                        try:
+                            for img_path in image_paths:
+                                try:
+                                    img = await asyncio.to_thread(Image.open, img_path)
+                                    sample_images.append(img)
+                                except Exception:
+                                    continue
+
+                            if not sample_images:
+                                await send_reply(client.send_message, ["me", "⚠️ No valid images to process."], {}, client)
+                                return
+
+                            prompt = (
+                                f"{chat_context}\n\nUser has sent multiple images."
+                                f"{' Caption: ' + caption if caption else ''} Generate a response based on the content of the images, and our chat context. "
+                                "Always follow the bot role, and talk like a human."
                             )
-                        elif not await handle_voice_message(client, message.chat.id, response, thread_id=message.message_thread_id):
-                            await send_reply(message.reply_text, [response], {}, client)
+                            input_data = [prompt] + sample_images
+                            response = await generate_gemini_response(
+                                input_data, chat_history, topic_id, bot_role=bot_role
+                            )
+                            if not response:
+                                await send_reply(
+                                    client.send_message,
+                                    ["me", f"⚠️ Gemini empty response\n@{message.chat.username or message.chat.id}:{topic_id}"],
+                                    {}, client,
+                                )
+                            elif not await handle_voice_message(client, message.chat.id, response, thread_id=message.message_thread_id):
+                                await send_reply(message.reply_text, [response], {}, client)
+                        finally:
+                            for img in sample_images:
+                                try:
+                                    img.close()
+                                except Exception:
+                                    pass
+                            for path in image_paths:
+                                if os.path.exists(path):
+                                    os.remove(path)
                     except Exception as e:
                         await send_reply(
                             client.send_message,
                             ["me", f"⚠️ process_images error\n@{message.chat.username or message.chat.id}:{topic_id}\n{str(e)}"],
                             {}, client,
                         )
-                    finally:
-                        for path in image_paths:
-                            if os.path.exists(path):
-                                os.remove(path)
 
-                client.image_timers[topic_id] = asyncio.create_task(process_images())
+                asyncio.create_task(process_images())
             return
+
+        file_type = None
 
         if message.video or message.video_note:
             file_type, file_path = (
@@ -551,6 +560,9 @@ async def handle_files(client: Client, message: Message):
             )
 
         if file_path and file_type:
+            chat_history = get_chat_history(topic_id, caption or f"[{file_type}]", user_name)
+            chat_context = "\n".join(chat_history)
+
             uploaded_file = await upload_file_to_gemini(file_path, file_type)
             prompt = (
                 f"{chat_context}\n\nUser has sent a {file_type}."
@@ -921,7 +933,8 @@ async def test_wchat_keys(client: Client, message: Message):
                     get_gemini_model(), generation_config=generation_config
                 )
                 test_model.safety_settings = safety_settings
-                response = await asyncio.to_thread(test_model.generate_content, test_prompt)
+                async with GEMINI_SEMAPHORE:
+                    response = await asyncio.to_thread(test_model.generate_content, test_prompt)
                 text = getattr(response, "text", None)
                 status = "OK" if text else "No response"
             except Exception as e:
