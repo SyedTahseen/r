@@ -51,7 +51,6 @@ def _sync_write_file(path, text):
         f.write(text)
 
 
-# --- flood-wait aware reply queue (mirrors gchat's send_reply pattern) ---
 reply_queue = asyncio.Queue()
 _reply_worker_task = None
 
@@ -97,12 +96,6 @@ async def send_reply(reply_func, args, kwargs, client):
     await reply_queue.put((reply_func, args, kwargs))
 
 
-# --- instant reply path for our own command messages ---
-# Commands (wchat, wrole, wswitch, setwchat, wtest) are low-volume, self
-# triggered actions (edit/delete our own message) and shouldn't sit behind
-# the throttled Gemini reply_queue, which exists to pace outgoing group
-# replies and survive FloodWait. Commands get their own direct path so
-# they execute immediately, while still handling FloodWait if it happens.
 async def instant_reply(reply_func, args, kwargs, client):
     if isinstance(args, tuple):
         args = list(args)
@@ -358,11 +351,6 @@ async def handle_gif(client: Client, message: Message):
         )
 
 
-# --- per-topic message buffering (mirrors gchat's per-user buffering) ---
-# Waits 8s after the last message in a topic before replying, so several
-# quick consecutive messages (even from different users in the same topic)
-# get combined into one prompt/response instead of triggering separate
-# overlapping replies.
 topic_message_buffer = defaultdict(list)
 topic_message_timers = {}
 topic_last_message = {}
@@ -598,7 +586,7 @@ async def wchat_command(client: Client, message: Message):
         group_id = str(message.chat.id)
 
         if len(parts) < 2:
-            await instant_reply(message.edit_text, [f"Usage: {prefix}wchat [on|off|del|all] [topic_id]"], {}, client)
+            await instant_reply(message.edit_text, [f"Usage: {prefix}wchat [on|off|del|all|r] [topic_id]"], {}, client)
             return
 
         if len(parts) == 2:
@@ -639,8 +627,24 @@ async def wchat_command(client: Client, message: Message):
                 {}, client,
             )
 
+        elif command == "r":
+            changed = False
+            if topic_id in enabled_topics:
+                enabled_topics.remove(topic_id)
+                db.set(settings_collection, "enabled_topics", enabled_topics)
+                changed = True
+            if topic_id in disabled_topics:
+                disabled_topics.remove(topic_id)
+                db.set(settings_collection, "disabled_topics", disabled_topics)
+                changed = True
+            await instant_reply(
+                message.edit_text,
+                [f"<spoiler>Removed: {topic_id}</spoiler>" if changed else f"<spoiler>Not found: {topic_id}</spoiler>"],
+                {}, client,
+            )
+
         else:
-            await instant_reply(message.edit_text, [f"Usage: {prefix}wchat [on|off|del|all] [topic_id]"], {}, client)
+            await instant_reply(message.edit_text, [f"Usage: {prefix}wchat [on|off|del|all|r] [topic_id]"], {}, client)
 
         await instant_reply(message.delete, [], {}, client)
     except Exception as e:
@@ -947,7 +951,7 @@ async def test_wchat_keys(client: Client, message: Message):
 
 
 modules_help["wchat"] = {
-    "wchat on/off/del/all [topic_id]": "Manage wchat for topics.",
+    "wchat on/off/del/all/r [topic_id]": "Manage wchat for topics.",
     "wrole [group|topic] <role>": "Set or reset group/topic role.",
     "wswitch [topic_id] <role>": "Show or set wchat roles.",
     "setwchat add/set/del <key|index>": "Manage Gemini API keys.",
