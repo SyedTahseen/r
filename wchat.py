@@ -29,7 +29,23 @@ generation_config = {
     "max_output_tokens": 40,
 }
 
-model = genai.GenerativeModel("gemini-2.0-flash", generation_config=generation_config)
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
+_gemini_model_cache = None
+
+def get_gemini_model():
+    global _gemini_model_cache
+    if _gemini_model_cache is not None:
+        return _gemini_model_cache
+    model_name = db.get(collection, "gemini_model") or DEFAULT_GEMINI_MODEL
+    _gemini_model_cache = model_name
+    return model_name
+
+def set_gemini_model(model_name: str):
+    global _gemini_model_cache
+    db.set(collection, "gemini_model", model_name)
+    _gemini_model_cache = model_name
+
+model = genai.GenerativeModel(get_gemini_model(), generation_config=generation_config)
 model.safety_settings = safety_settings
 
 ROLES_URL = "https://gist.githubusercontent.com/iTahseen/00890d65192ca3bd9b2a62eb034b96ab/raw/roles.json"
@@ -82,7 +98,7 @@ async def generate_gemini_response(input_data, chat_history, topic_id):
         try:
             current_key = gemini_keys[current_key_index]
             genai.configure(api_key=current_key)
-            model = genai.GenerativeModel("gemini-2.0-flash", generation_config=generation_config)
+            model = genai.GenerativeModel(get_gemini_model(), generation_config=generation_config)
             model.safety_settings = safety_settings
 
             response = model.generate_content(input_data)
@@ -211,7 +227,7 @@ async def wchat(client: Client, message: Message):
             try:
                 current_key = gemini_keys[current_key_index]
                 genai.configure(api_key=current_key)
-                model = genai.GenerativeModel("gemini-2.0-flash", generation_config=generation_config)
+                model = genai.GenerativeModel(get_gemini_model(), generation_config=generation_config)
                 model.safety_settings = safety_settings
 
                 prompt = build_prompt(bot_role, chat_history, user_message)
@@ -509,7 +525,13 @@ async def set_gemini_key(client: Client, message: Message):
         gemini_keys = db.get(collection, "gemini_keys") or []
         current_key_index = db.get(collection, "current_key_index") or 0
 
-        if subcommand == "add" and key:
+        if subcommand == "model":
+            if key:
+                set_gemini_model(key)
+                await message.edit_text(f"Gemini model set to: <code>{key}</code>")
+            else:
+                await message.edit_text(f"Current Gemini model: <code>{get_gemini_model()}</code>")
+        elif subcommand == "add" and key:
             gemini_keys.append(key)
             db.set(collection, "gemini_keys", gemini_keys)
             await message.edit_text("New Gemini API key added successfully!")
@@ -519,7 +541,7 @@ async def set_gemini_key(client: Client, message: Message):
                 current_key_index = index
                 db.set(collection, "current_key_index", current_key_index)
                 genai.configure(api_key=gemini_keys[current_key_index])
-                model = genai.GenerativeModel("gemini-2.0-flash-exp", generation_config=generation_config)
+                model = genai.GenerativeModel(get_gemini_model(), generation_config=generation_config)
                 model.safety_settings = safety_settings
                 await message.edit_text(f"Current Gemini API key set to key {key}.")
             else:
@@ -541,13 +563,61 @@ async def set_gemini_key(client: Client, message: Message):
             )
             current_key = gemini_keys[current_key_index] if gemini_keys else "None"
             await message.edit_text(
-                f"<b>Gemini API keys:</b>\n\n<code>{keys_list}</code>\n\n<b>Current key:</b> <code>{current_key}</code>"
+                f"<b>Gemini API keys:</b>\n\n<code>{keys_list}</code>\n\n"
+                f"<b>Current key:</b> <code>{current_key}</code>\n"
+                f"<b>Model:</b> <code>{get_gemini_model()}</code>"
             )
         await asyncio.sleep(1)
     except Exception as e:
         await client.send_message(
             "me", f"An error occurred in the `setwkey` command:\n\n{str(e)}"
         )
+
+@Client.on_message(filters.command("wtest", prefix) & filters.me)
+async def test_wchat_keys(client: Client, message: Message):
+    file_path = None
+    try:
+        await message.edit_text("Testing Gemini keys...")
+        gemini_keys = db.get(collection, "gemini_keys") or []
+        if not gemini_keys:
+            await message.edit_text("No Gemini keys configured.")
+            return
+
+        test_prompt = "ping"
+        result_lines = [
+            "Gemini API Key Test Results (wchat)\n",
+            f"Model: {get_gemini_model()}\n",
+            "-" * 40,
+        ]
+        for idx, key in enumerate(gemini_keys):
+            try:
+                genai.configure(api_key=key)
+                test_model = genai.GenerativeModel(
+                    get_gemini_model(), generation_config=generation_config
+                )
+                test_model.safety_settings = safety_settings
+                response = await asyncio.to_thread(test_model.generate_content, test_prompt)
+                text = getattr(response, "text", None)
+                status = "OK" if text else "No response"
+            except Exception as e:
+                status = f"ERROR: {e.__class__.__name__}: {str(e)[:80]}"
+            result_lines.append(f"{idx + 1}. {key[:10]}... -> {status}")
+
+        result_text = "\n".join(result_lines)
+        file_path = "wchat_test_results.txt"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(result_text)
+        await client.send_document(
+            chat_id=message.chat.id,
+            document=file_path,
+            caption="Gemini API key test results (wchat)",
+        )
+        await message.delete()
+    except Exception as e:
+        await client.send_message("me", f"An error occurred in the `wtest` command:\n\n{str(e)}")
+    finally:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
 
 
 modules_help["wchat"] = {
@@ -562,5 +632,7 @@ modules_help["wchat"] = {
     "setwkey add <key>": "Add a new Gemini API key.",
     "setwkey set <index>": "Set the current Gemini API key by index.",
     "setwkey del <index>": "Delete a Gemini API key by index.",
-    "setwkey": "Display all available Gemini API keys and the current key.",
+    "setwkey model <name>": "Set or show the current Gemini model.",
+    "setwkey": "Display all available Gemini API keys, current key, and model.",
+    "wtest": "Test all configured Gemini keys against the current model.",
 }
