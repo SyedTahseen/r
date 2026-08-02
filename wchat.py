@@ -2,6 +2,7 @@ import asyncio
 import os
 import random
 import time
+from collections import defaultdict
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
@@ -357,6 +358,70 @@ async def handle_gif(client: Client, message: Message):
         )
 
 
+# --- per-topic message buffering (mirrors gchat's per-user buffering) ---
+# Waits 8s after the last message in a topic before replying, so several
+# quick consecutive messages (even from different users in the same topic)
+# get combined into one prompt/response instead of triggering separate
+# overlapping replies.
+topic_message_buffer = defaultdict(list)
+topic_message_timers = {}
+topic_last_message = {}
+
+
+async def process_topic_buffer(client, topic_id):
+    try:
+        await asyncio.sleep(8)
+        buffered = topic_message_buffer.pop(topic_id, [])
+        last_message = topic_last_message.pop(topic_id, None)
+        topic_message_timers.pop(topic_id, None)
+
+        if not buffered or last_message is None:
+            return
+
+        group_id = str(last_message.chat.id)
+
+        roles = await fetch_roles()
+        default_role = roles.get("default")
+        if not default_role:
+            await send_reply(client.send_message, ["me", "⚠️ 'default' role missing."], {}, client)
+            return
+
+        bot_role = db.get(settings_collection, f"custom_roles.{topic_id}") or group_roles.get(group_id) or default_role
+
+        chat_history = None
+        for user_name, user_message in buffered:
+            chat_history = get_chat_history(topic_id, user_message, user_name)
+
+        await asyncio.sleep(random.choice([4, 6]))
+
+        prompt = build_prompt(chat_history)
+        bot_response = await generate_gemini_response(prompt, chat_history, topic_id, bot_role=bot_role)
+
+        if not bot_response:
+            await send_reply(
+                client.send_message,
+                ["me", f"⚠️ Gemini empty response\n@{last_message.chat.username or last_message.chat.id}:{last_message.message_thread_id}"],
+                {}, client,
+            )
+            return
+
+        if await handle_voice_message(client, last_message.chat.id, bot_response, thread_id=last_message.message_thread_id):
+            return
+
+        await send_reply(
+            client.send_message,
+            [last_message.chat.id, bot_response],
+            {"message_thread_id": last_message.message_thread_id},
+            client,
+        )
+    except Exception as e:
+        await send_reply(
+            client.send_message,
+            ["me", f"⚠️ wchat module error\n{topic_id}\n{str(e)}"],
+            {}, client,
+        )
+
+
 @Client.on_message(filters.text & filters.group & ~filters.me)
 async def wchat(client: Client, message: Message):
     try:
@@ -375,39 +440,14 @@ async def wchat(client: Client, message: Message):
         ):
             return
 
-        roles = await fetch_roles()
-        default_role = roles.get("default")
+        topic_message_buffer[topic_id].append((user_name, user_message))
+        topic_last_message[topic_id] = message
 
-        if not default_role:
-            await send_reply(client.send_message, ["me", "⚠️ 'default' role missing."], {}, client)
-            return
+        existing_timer = topic_message_timers.get(topic_id)
+        if existing_timer:
+            existing_timer.cancel()
 
-        bot_role = db.get(settings_collection, f"custom_roles.{topic_id}") or group_roles.get(group_id) or default_role
-        chat_history = get_chat_history(topic_id, user_message, user_name)
-
-        await asyncio.sleep(random.choice([4, 6]))
-        await send_typing_action(client, message.chat.id, user_message)
-
-        prompt = build_prompt(chat_history)
-        bot_response = await generate_gemini_response(prompt, chat_history, topic_id, bot_role=bot_role)
-
-        if not bot_response:
-            await send_reply(
-                client.send_message,
-                ["me", f"⚠️ Gemini empty response\n@{message.chat.username or message.chat.id}:{message.message_thread_id}"],
-                {}, client,
-            )
-            return
-
-        if await handle_voice_message(client, message.chat.id, bot_response, thread_id=message.message_thread_id):
-            return
-
-        await send_reply(
-            client.send_message,
-            [message.chat.id, bot_response],
-            {"message_thread_id": message.message_thread_id},
-            client,
-        )
+        topic_message_timers[topic_id] = asyncio.create_task(process_topic_buffer(client, topic_id))
     except Exception as e:
         await send_reply(
             client.send_message,
