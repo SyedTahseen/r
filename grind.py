@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Grindr API – Explore Messenger (Email/Password Login)
-Based on OpenGrind OpenAPI spec (2026-07-20)
+Grindr API – Explore Messenger (Email/Password via curl_cffi)
+Uses TLS/HTTP-2 fingerprint impersonation to bypass Cloudflare blocks.
 """
 
-import requests
+from curl_cffi import requests
 import time
 import sys
 
@@ -20,17 +20,13 @@ DEFAULT_HEADERS = {
 
 class GrindrClient:
     def __init__(self):
-        self.session = requests.Session()
+        # curl_cffi Session with Chrome impersonation
+        self.session = requests.Session(impersonate="chrome")
         self.session.headers.update(DEFAULT_HEADERS)
         self.profile_id = None
-        self.session_id = None   # JWT
+        self.session_id = None
 
     def login(self, email: str, password: str) -> dict:
-        """
-        POST /v8/sessions
-        Schema per spec: SessionCreateRequest requires
-        { email, password, authToken, token, geohash }
-        """
         payload = {
             "email": email,
             "password": password,
@@ -53,7 +49,6 @@ class GrindrClient:
         return data
 
     def set_location(self, geohash: str):
-        """PUT /v4/location"""
         if len(geohash) != 12:
             raise ValueError("Geohash must be exactly 12 characters.")
         resp = self.session.put(f"{BASE_URL}/v4/location", json={"geohash": geohash})
@@ -62,7 +57,6 @@ class GrindrClient:
         return True
 
     def get_cascade(self, geohash: str, page: int = 1) -> dict:
-        """GET /v4/cascade — nearbyGeoHash is required per spec."""
         params = {
             "nearbyGeoHash": geohash,
             "pageNumber": page,
@@ -72,7 +66,6 @@ class GrindrClient:
         return resp.json()
 
     def send_text_message(self, target_profile_id: int, text: str) -> dict:
-        """POST /v4/chat/message/send"""
         payload = {
             "type": "Text",
             "target": {
@@ -88,14 +81,12 @@ class GrindrClient:
 
 def main():
     # ========================== CONFIGURATION ==========================
-    EMAIL = "itxtahseen11@gmail.com"      # <-- your Grindr email
-    PASSWORD = "qureshihashmI1$"            # <-- your Grindr password
+    EMAIL = "itxtahseen11@gmail.com"
+    PASSWORD = "qureshihashmI1$"
 
-    # 12-char geohash for the city you want to Explore
-    # Default: dr5r9x9jwu5n (New York City, Times Square area)
+    # Default: New York City (Times Square area)
     EXPLORE_GEOHASH = "dr5r9x9jwu5n"
 
-    # Your message
     MESSAGE_TEXT = "Hey! 👋"
     # ===================================================================
 
@@ -113,19 +104,13 @@ def main():
         if e.response.status_code == 401:
             print("  -> Wrong email or password.")
         elif e.response.status_code == 403:
-            print("  -> 403 Forbidden: Grindr blocked this request.")
-            print("     Python 'requests' does not match the Android app's TLS fingerprint.")
-            print("     Try running this from a mobile environment, or use curl_cffi.")
+            print("  -> Still blocked. Try 'chrome_android' instead of 'chrome' on line 22.")
         sys.exit(1)
 
-    # 2. Teleport to Explore location
-    try:
-        client.set_location(EXPLORE_GEOHASH)
-    except requests.HTTPError as e:
-        print(f"Location update failed: {e}")
-        sys.exit(1)
+    # 2. Set location
+    client.set_location(EXPLORE_GEOHASH)
 
-    # 3. Paginate through cascade
+    # 3. Fetch cascade
     profile_ids = []
     page = 1
 
