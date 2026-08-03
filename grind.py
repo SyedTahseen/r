@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Grindr API – Explore Messenger (Email/Password via curl_cffi)
-Uses TLS/HTTP-2 fingerprint impersonation to bypass Cloudflare blocks.
+Uses chrome_android impersonation to match the mobile app's fingerprint.
 """
 
 from curl_cffi import requests
+from curl_cffi.requests.errors import HTTPError
 import time
 import sys
 
@@ -20,8 +21,8 @@ DEFAULT_HEADERS = {
 
 class GrindrClient:
     def __init__(self):
-        # curl_cffi Session with Chrome impersonation
-        self.session = requests.Session(impersonate="chrome")
+        # Use chrome_android to match the mobile TLS/HTTP2 fingerprint
+        self.session = requests.Session(impersonate="chrome_android")
         self.session.headers.update(DEFAULT_HEADERS)
         self.profile_id = None
         self.session_id = None
@@ -99,16 +100,23 @@ def main():
     # 1. Log in
     try:
         client.login(EMAIL, PASSWORD)
-    except requests.HTTPError as e:
-        print(f"Login failed: {e}")
+    except HTTPError as e:
+        print(f"Login failed: HTTP {e.response.status_code}")
         if e.response.status_code == 401:
             print("  -> Wrong email or password.")
         elif e.response.status_code == 403:
-            print("  -> Still blocked. Try 'chrome_android' instead of 'chrome' on line 22.")
+            print("  -> 403 Forbidden: Grindr blocked this request.")
+            print("     Even chrome_android impersonation was rejected.")
+            print("     Grindr may require exact Android headers (L-Device-Info, etc.)")
+            print("     that only the official app or grindr.rs crate can generate.")
         sys.exit(1)
 
     # 2. Set location
-    client.set_location(EXPLORE_GEOHASH)
+    try:
+        client.set_location(EXPLORE_GEOHASH)
+    except HTTPError as e:
+        print(f"Location update failed: HTTP {e.response.status_code}")
+        sys.exit(1)
 
     # 3. Fetch cascade
     profile_ids = []
@@ -118,8 +126,8 @@ def main():
     while True:
         try:
             cascade = client.get_cascade(EXPLORE_GEOHASH, page=page)
-        except requests.HTTPError as e:
-            print(f"Cascade failed on page {page}: {e}")
+        except HTTPError as e:
+            print(f"Cascade failed on page {page}: HTTP {e.response.status_code}")
             break
 
         entries = cascade.get("profiles") or cascade.get("entries") or []
@@ -144,8 +152,8 @@ def main():
         try:
             client.send_text_message(pid, MESSAGE_TEXT)
             print(f"  ✓ Sent to {pid}")
-        except requests.HTTPError as e:
-            print(f"  ✗ Failed to send to {pid}: {e}")
+        except HTTPError as e:
+            print(f"  ✗ Failed to send to {pid}: HTTP {e.response.status_code}")
             if e.response.status_code == 429:
                 print("  ! Rate limited – sleeping 60s")
                 time.sleep(60)
