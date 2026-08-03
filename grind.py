@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Grindr API – Explore Messenger (Email/Password via curl_cffi)
-Uses chrome_android impersonation to match the mobile app's fingerprint.
 """
 
 from curl_cffi import requests
-from curl_cffi.requests.errors import HTTPError
+from curl_cffi.requests.exceptions import HTTPError
 import time
 import sys
 
@@ -21,7 +20,7 @@ DEFAULT_HEADERS = {
 
 class GrindrClient:
     def __init__(self):
-        # Use chrome_android to match the mobile TLS/HTTP2 fingerprint
+        # Try chrome_android first; if it fails, change to "chrome" or "safari_ios"
         self.session = requests.Session(impersonate="chrome_android")
         self.session.headers.update(DEFAULT_HEADERS)
         self.profile_id = None
@@ -85,7 +84,7 @@ def main():
     EMAIL = "itxtahseen11@gmail.com"
     PASSWORD = "qureshihashmI1$"
 
-    # Default: New York City (Times Square area)
+    # Default: New York City
     EXPLORE_GEOHASH = "dr5r9x9jwu5n"
 
     MESSAGE_TEXT = "Hey! 👋"
@@ -106,17 +105,11 @@ def main():
             print("  -> Wrong email or password.")
         elif e.response.status_code == 403:
             print("  -> 403 Forbidden: Grindr blocked this request.")
-            print("     Even chrome_android impersonation was rejected.")
-            print("     Grindr may require exact Android headers (L-Device-Info, etc.)")
-            print("     that only the official app or grindr.rs crate can generate.")
+            print("     Try changing 'chrome_android' to 'chrome' on line 24.")
         sys.exit(1)
 
     # 2. Set location
-    try:
-        client.set_location(EXPLORE_GEOHASH)
-    except HTTPError as e:
-        print(f"Location update failed: HTTP {e.response.status_code}")
-        sys.exit(1)
+    client.set_location(EXPLORE_GEOHASH)
 
     # 3. Fetch cascade
     profile_ids = []
