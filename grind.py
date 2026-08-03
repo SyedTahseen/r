@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Grindr API – Explore Messenger (Google OAuth variant)
+Grindr API – Explore Messenger (Email/Password Login)
 Based on OpenGrind OpenAPI spec (2026-07-20)
 """
 
@@ -23,54 +23,40 @@ class GrindrClient:
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
         self.profile_id = None
-        self.session_id = None   # JWT for Authorization header
+        self.session_id = None   # JWT
 
-    def login_with_google_token(self, google_access_token: str) -> dict:
+    def login(self, email: str, password: str) -> dict:
         """
-        POST /v8/sessions/thirdparty
-        Body: ThirdPartyRequest { thirdPartyVendor: 2, thirdPartyToken, geohash }
-        Vendor 2 = Google per the spec.
+        POST /v8/sessions
+        Schema per spec: SessionCreateRequest requires
+        { email, password, authToken, token, geohash }
         """
         payload = {
-            "thirdPartyVendor": 2,
-            "thirdPartyToken": google_access_token,
+            "email": email,
+            "password": password,
+            "authToken": None,
+            "token": None,
             "geohash": None,
         }
-        resp = self.session.post(f"{BASE_URL}/v8/sessions/thirdparty", json=payload)
+        resp = self.session.post(f"{BASE_URL}/v8/sessions", json=payload)
         resp.raise_for_status()
         data = resp.json()
 
-        # If registered is false, this Google identity has no Grindr account yet.
-        if not data.get("registered", True):
-            raise RuntimeError(
-                "This Google account is not linked to a Grindr account yet. "
-                "You need to create one via the app first."
-            )
-
-        auth = data.get("authenticationResponse", {})
-        self.profile_id = auth.get("profileId")
-        self.session_id = auth.get("sessionId")   # This is the JWT!
+        self.profile_id = data.get("profileId")
+        self.session_id = data.get("sessionId")
 
         if not self.session_id:
             raise ValueError("Login response missing sessionId")
 
         self.session.headers["Authorization"] = f"Grindr3 {self.session_id}"
-        print(f"Logged in via Google. Profile ID: {self.profile_id}")
+        print(f"Logged in. Profile ID: {self.profile_id}")
         return data
-
-    def use_existing_jwt(self, jwt_token: str):
-        """Use a previously obtained sessionId JWT directly."""
-        self.session_id = jwt_token
-        self.session.headers["Authorization"] = f"Grindr3 {jwt_token}"
 
     def set_location(self, geohash: str):
         """PUT /v4/location"""
         if len(geohash) != 12:
             raise ValueError("Geohash must be exactly 12 characters.")
-        resp = self.session.put(
-            f"{BASE_URL}/v4/location",
-            json={"geohash": geohash}
-        )
+        resp = self.session.put(f"{BASE_URL}/v4/location", json={"geohash": geohash})
         resp.raise_for_status()
         print(f"Location set to: {geohash}")
         return True
@@ -102,8 +88,8 @@ class GrindrClient:
 
 def main():
     # ========================== CONFIGURATION ==========================
-    # Paste your Google OAuth token here (the ya29... string)
-    GOOGLE_ACCESS_TOKEN = "ya29.a0ARGnu0YuYdBgOFaYJTKPXD1_gvrIzYP3IRWJG7qReG0OrqY5-PnJ48il8JupYAbRBDxSPP4KgjxmF804xbeC6B1B50xt86hZV-Z5kIqqlHzmkN6q-R53NQemGG783DMZo19I6MzGsziVjiPbnfsBMi1xdI5Sswjslm58RcM2_QYBU_95oJbtz4u3M6r9YaYkdHmwnfxBGNcA_O7Z72shB-Tjfv6RI8vqyOQ4DDMJs7mA1xjchkU_xCGLx-Rgl1WiQZrUQhr3F5EzSn4rYDLRSJwJL_4rRpQaCgYKAU4SARISFQHGX2MimESrtY8WOaaEqgFWt7raQw0294"
+    EMAIL = "itxtahseen11@gmail.com"      # <-- your Grindr email
+    PASSWORD = "qureshihashmI1$"            # <-- your Grindr password
 
     # 12-char geohash for the city you want to Explore
     # Default: dr5r9x9jwu5n (New York City, Times Square area)
@@ -113,24 +99,33 @@ def main():
     MESSAGE_TEXT = "Hey! 👋"
     # ===================================================================
 
+    if EMAIL == "your_email@example.com" or not PASSWORD:
+        print("Error: Fill in EMAIL and PASSWORD.")
+        sys.exit(1)
+
     client = GrindrClient()
 
-    # Step 1: Exchange Google token for Grindr session
+    # 1. Log in
     try:
-        client.login_with_google_token(GOOGLE_ACCESS_TOKEN)
+        client.login(EMAIL, PASSWORD)
     except requests.HTTPError as e:
-        print(f"Google login failed: {e}")
+        print(f"Login failed: {e}")
         if e.response.status_code == 401:
-            print("  -> The Google token is expired or invalid. Get a fresh one from the OpenGrind app.")
-        sys.exit(1)
-    except RuntimeError as e:
-        print(e)
+            print("  -> Wrong email or password.")
+        elif e.response.status_code == 403:
+            print("  -> 403 Forbidden: Grindr blocked this request.")
+            print("     Python 'requests' does not match the Android app's TLS fingerprint.")
+            print("     Try running this from a mobile environment, or use curl_cffi.")
         sys.exit(1)
 
-    # Step 2: Teleport to Explore location
-    client.set_location(EXPLORE_GEOHASH)
+    # 2. Teleport to Explore location
+    try:
+        client.set_location(EXPLORE_GEOHASH)
+    except requests.HTTPError as e:
+        print(f"Location update failed: {e}")
+        sys.exit(1)
 
-    # Step 3: Paginate through cascade
+    # 3. Paginate through cascade
     profile_ids = []
     page = 1
 
@@ -140,8 +135,6 @@ def main():
             cascade = client.get_cascade(EXPLORE_GEOHASH, page=page)
         except requests.HTTPError as e:
             print(f"Cascade failed on page {page}: {e}")
-            if e.response.status_code == 401:
-                print("  -> Session expired. Get a fresh Google token.")
             break
 
         entries = cascade.get("profiles") or cascade.get("entries") or []
@@ -161,7 +154,7 @@ def main():
 
     print(f"Found {len(profile_ids)} profile(s).")
 
-    # Step 4: Send messages
+    # 4. Send messages
     for pid in profile_ids:
         try:
             client.send_text_message(pid, MESSAGE_TEXT)
