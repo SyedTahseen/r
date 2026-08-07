@@ -20,7 +20,6 @@ def google_translate(query, source_lang="auto", target_lang="en"):
     }
     response = requests.get(url, params=params, headers=headers)
     if response.status_code == 200:
-        response.encoding = "utf-8"
         data = response.json()
         return "".join([item[0] for item in data[0]])
     else:
@@ -65,14 +64,14 @@ async def language_status(_, message: Message):
     else:
         await message.edit(f"<b>Usage:</b> \n<code>{prefix}lang</code> [check language] \n<code>{prefix}lang off</code> [turn off auto-translation].")
 
-@Client.on_message((filters.text | filters.caption) & auto_translate_filter, group=-100)
+@Client.on_message((filters.text | filters.caption) & auto_translate_filter)
 async def auto_translate(_, message: Message):
     if message.from_user and not message.from_user.is_self:
-        message.continue_propagation()
+        return
 
     lang_code = db.get("custom.translate", str(message.chat.id), None)
     if not lang_code:
-        message.continue_propagation()
+        return
 
     text = message.text or message.caption
     try:
@@ -85,7 +84,6 @@ async def auto_translate(_, message: Message):
     except Exception as e:
         await message.reply(f"Translation failed: {e}")
 
-    message.continue_propagation()
 
 modules_help["auto_translate"] = {
     "setlang <language_code>": "Set the preferred language for this chat.",
