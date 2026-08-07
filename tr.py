@@ -20,6 +20,7 @@ def google_translate(query, source_lang="auto", target_lang="en"):
     }
     response = requests.get(url, params=params, headers=headers)
     if response.status_code == 200:
+        response.encoding = "utf-8"
         data = response.json()
         return "".join([item[0] for item in data[0]])
     else:
@@ -67,11 +68,11 @@ async def language_status(_, message: Message):
 @Client.on_message((filters.text | filters.caption) & auto_translate_filter, group=-100)
 async def auto_translate(_, message: Message):
     if message.from_user and not message.from_user.is_self:
-        return
+        message.continue_propagation()
 
     lang_code = db.get("custom.translate", str(message.chat.id), None)
     if not lang_code:
-        return
+        message.continue_propagation()
 
     text = message.text or message.caption
     try:
@@ -83,6 +84,8 @@ async def auto_translate(_, message: Message):
                 await message.edit_caption(translated_text)
     except Exception as e:
         await message.reply(f"Translation failed: {e}")
+
+    message.continue_propagation()
 
 
 modules_help["auto_translate"] = {
