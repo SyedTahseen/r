@@ -87,7 +87,6 @@ async def auto_translate(_, message: Message):
 
     message.continue_propagation()
 
-
 modules_help["auto_translate"] = {
     "setlang <language_code>": "Set the preferred language for this chat.",
     "lang": "Show the chat's language or use `lang off` to turn off auto-translation.",
