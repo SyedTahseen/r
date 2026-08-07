@@ -20,6 +20,7 @@ def google_translate(query, source_lang="auto", target_lang="en"):
     }
     response = requests.get(url, params=params, headers=headers)
     if response.status_code == 200:
+        response.encoding = "utf-8"
         data = response.json()
         return "".join([item[0] for item in data[0]])
     else:
@@ -27,7 +28,8 @@ def google_translate(query, source_lang="auto", target_lang="en"):
 
 def auto_translate_filter(_, __, message: Message):
     lang_code = db.get("custom.translate", str(message.chat.id), None)
-    return bool(lang_code) and not message.text.startswith(prefix)
+    text = message.text or message.caption
+    return bool(lang_code) and bool(text) and not text.startswith(prefix)
 
 auto_translate_filter = create(auto_translate_filter)
 
@@ -63,21 +65,27 @@ async def language_status(_, message: Message):
     else:
         await message.edit(f"<b>Usage:</b> \n<code>{prefix}lang</code> [check language] \n<code>{prefix}lang off</code> [turn off auto-translation].")
 
-@Client.on_message(filters.text & auto_translate_filter)
+@Client.on_message((filters.text | filters.caption) & auto_translate_filter, group=-100)
 async def auto_translate(_, message: Message):
     if message.from_user and not message.from_user.is_self:
-        return
+        message.continue_propagation()
 
     lang_code = db.get("custom.translate", str(message.chat.id), None)
     if not lang_code:
-        return
+        message.continue_propagation()
 
+    text = message.text or message.caption
     try:
-        translated_text = google_translate(message.text, target_lang=lang_code)
-        if translated_text.strip() and translated_text != message.text:
-            await message.edit(translated_text)
+        translated_text = google_translate(text, target_lang=lang_code)
+        if translated_text.strip() and translated_text != text:
+            if message.text:
+                await message.edit(translated_text)
+            else:
+                await message.edit_caption(translated_text)
     except Exception as e:
         await message.reply(f"Translation failed: {e}")
+
+    message.continue_propagation()
 
 modules_help["auto_translate"] = {
     "setlang <language_code>": "Set the preferred language for this chat.",
