@@ -17,6 +17,7 @@ def google_translate(query, source_lang="auto", target_lang="en"):
     }
     response = requests.get(url, params=params, headers=headers)
     if response.status_code == 200:
+        response.encoding = "utf-8"
         data = response.json()
         return "".join([item[0] for item in data[0]])
     else:
@@ -25,7 +26,8 @@ def google_translate(query, source_lang="auto", target_lang="en"):
 @Client.on_message(filters.command(["tr"], prefix))
 async def translate_text(client, message: Message):
     args = message.text.split(maxsplit=2)
-    if len(args) < 2 and not (message.reply_to_message and message.reply_to_message.text):
+    reply_text = message.reply_to_message.text or message.reply_to_message.caption if message.reply_to_message else None
+    if len(args) < 2 and not reply_text:
         usage_message = (
             f"<b>Usage:</b> <code>{prefix}gtr [language] [text]</code>\n"
         )
@@ -34,8 +36,8 @@ async def translate_text(client, message: Message):
 
     target_lang = args[1] if len(args) > 1 else "en"
     query = args[2].strip() if len(args) > 2 else ""
-    if not query and message.reply_to_message and message.reply_to_message.text:
-        query = message.reply_to_message.text.strip()
+    if not query and reply_text:
+        query = reply_text.strip()
 
     if not query:
         await message.reply("No text found to translate.")
