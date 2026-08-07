@@ -1,10 +1,7 @@
 import requests
-from urllib.parse import quote
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message
-from pyrogram.filters import create
 from utils import modules_help, prefix
-from utils.db import db
 
 def google_translate(query, source_lang="auto", target_lang="en"):
     url = "https://translate.google.com/translate_a/single"
@@ -20,76 +17,38 @@ def google_translate(query, source_lang="auto", target_lang="en"):
     }
     response = requests.get(url, params=params, headers=headers)
     if response.status_code == 200:
-        response.encoding = "utf-8"
         data = response.json()
         return "".join([item[0] for item in data[0]])
     else:
         raise Exception("Failed to fetch translation.")
 
-def auto_translate_filter(_, __, message: Message):
-    lang_code = db.get("custom.translate", str(message.chat.id), None)
-    text = message.text or message.caption
-    return bool(lang_code) and bool(text) and not text.startswith(prefix)
-
-auto_translate_filter = create(auto_translate_filter)
-
-@Client.on_message(filters.command(["setlang"], prefix))
-async def set_language(_, message: Message):
-    if len(message.command) < 2:
-        await message.edit(
-            f"<b>Usage:</b> <code>{prefix}setlang [language_code]</code>\n\n"
+@Client.on_message(filters.command(["tr"], prefix))
+async def translate_text(client, message: Message):
+    args = message.text.split(maxsplit=2)
+    if len(args) < 2 and not (message.reply_to_message and message.reply_to_message.text):
+        usage_message = (
+            f"<b>Usage:</b> <code>{prefix}gtr [language] [text]</code>\n"
         )
+        await message.edit(usage_message) if message.from_user.is_self else await message.reply(usage_message)
         return
 
-    lang_code = message.text.split(maxsplit=1)[1].lower()
-    db.set("custom.translate", str(message.chat.id), lang_code)
-    await message.edit(f"<b>Language has been set to</b> <code>[{lang_code}]</code>.")
+    target_lang = args[1] if len(args) > 1 else "en"
+    query = args[2].strip() if len(args) > 2 else ""
+    if not query and message.reply_to_message and message.reply_to_message.text:
+        query = message.reply_to_message.text.strip()
 
-@Client.on_message(filters.command(["lang"], prefix))
-async def language_status(_, message: Message):
-    chat_id = str(message.chat.id)
-    command_text = message.text.strip().lower()
+    if not query:
+        await message.reply("No text found to translate.")
+        return
 
-    if command_text == f"{prefix}lang":
-        lang_code = db.get("custom.translate", chat_id, None)
-        if lang_code:
-            await message.edit(f"<b>Current language</b> <code>[{lang_code}]</code>.")
-        else:
-            await message.edit(f"<code>No language set.</code>")
-    elif command_text == f"{prefix}lang off":
-        result = db.remove("custom.translate", chat_id)
-        if result:
-            await message.edit("Auto-translation has been turned off for this chat.")
-        else:
-            await message.edit("<b>Auto-translation is disabled.</b>")
-    else:
-        await message.edit(f"<b>Usage:</b> \n<code>{prefix}lang</code> [check language] \n<code>{prefix}lang off</code> [turn off auto-translation].")
+    processing_message = await (message.edit("Translating...") if message.from_user.is_self else message.reply("Translating..."))
 
-@Client.on_message((filters.text | filters.caption) & auto_translate_filter, group=-100)
-async def auto_translate(_, message: Message):
-    if message.from_user and not message.from_user.is_self:
-        message.continue_propagation()
-
-    lang_code = db.get("custom.translate", str(message.chat.id), None)
-    if not lang_code:
-        message.continue_propagation()
-
-    text = message.text or message.caption
     try:
-        translated_text = google_translate(text, target_lang=lang_code)
-        if translated_text.strip() and translated_text != text:
-            if message.text:
-                await message.edit(translated_text)
-            else:
-                await message.edit_caption(translated_text)
+        translated_text = google_translate(query, target_lang=target_lang)
+        await processing_message.edit(f"**Translated Text ({target_lang.upper()}):**\n{translated_text}", parse_mode=enums.ParseMode.MARKDOWN)
     except Exception as e:
-        await message.reply(f"Translation failed: {e}")
+        await processing_message.edit(f"Failed to translate the text: {str(e)}")
 
-    message.continue_propagation()
-
-
-modules_help["auto_translate"] = {
-    "setlang <language_code>": "Set the preferred language for this chat.",
-    "lang": "Show the chat's language or use `lang off` to turn off auto-translation.",
-    "Auto-translation": "Automatically translates and edits your messages in the chat to the set language."
+modules_help["translate"] = {
+    "tr [language] [text]": "Translate the provided text to the specified language."
 }
